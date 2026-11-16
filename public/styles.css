@@ -1,0 +1,115 @@
+/* Estilos CSS Nativos de Ángel Arena (Enterprise Pro Edition) */
+:root {
+    --bg-dark: #060A12;
+    --card-dark: #0F172A;
+    --surface-dark: #1E293B;
+    --neon-green: #10B981;
+    --neon-cyan: #06B6D4;
+    --amber-gold: #F59E0B;
+    --rose-red: #F43F5E;
+}
+
+* {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #060A12;
+    color: #F8FAFC;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
+    background-image: 
+        radial-gradient(circle at 15% 0%, rgba(16, 185, 129, 0.14) 0%, transparent 45%),
+        radial-gradient(circle at 85% 15%, rgba(6, 182, 212, 0.12) 0%, transparent 45%);
+}
+
+.glass-panel {
+    background: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+}
+
+.btn-primary-gradient {
+    background: linear-gradient(90deg, #10B981 0%, #06B6D4 100%);
+    color: #020617;
+    font-weight: 800;
+    border-radius: 14px;
+    border: none;
+    cursor: pointer;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+}
+.btn-primary-gradient:active {
+    transform: scale(0.98);
+}
+
+/* Cancha de Fútbol 2D Interactiva */
+.pitch-2d {
+    background: linear-gradient(180deg, #065f46 0%, #047857 50%, #065f46 100%);
+    border: 2px solid rgba(255, 255, 255, 0.45);
+    border-radius: 18px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.55);
+    touch-action: manipulation;
+}
+.pitch-stripes {
+    background-image: repeating-linear-gradient(
+        0deg,
+        rgba(255, 255, 255, 0.05) 0px,
+        rgba(255, 255, 255, 0.05) 26px,
+        transparent 26px,
+        transparent 52px
+    );
+}
+
+.player-token {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    transition: top 0.22s cubic-bezier(0.22, 1, 0.36, 1), left 0.22s cubic-bezier(0.22, 1, 0.36, 1), transform 0.15s ease;
+    z-index: 10;
+    user-select: none;
+}
+.player-token:hover {
+    transform: translate(-50%, -50%) scale(1.08);
+}
+.player-token.selected-token {
+    z-index: 20;
+    transform: translate(-50%, -50%) scale(1.14);
+}
+
+/* Tarjeta Estilo FUT Pro */
+.fut-pro-card {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #064e3b 100%);
+    border: 2px solid #10B981;
+    box-shadow: 0 20px 50px rgba(16, 185, 129, 0.28);
+}
+
+@keyframes pulseLive {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(1.2); }
+}
+.live-dot {
+    animation: pulseLive 1.4s infinite ease-in-out;
+}
+
+.fallback-input {
+    width: 100%;
+    background-color: #090D16;
+    border: 1px solid #334155;
+    color: #FFFFFF;
+    padding: 11px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+}
+.fallback-input:focus {
+    outline: none;
+    border-color: #10B981;
+}
