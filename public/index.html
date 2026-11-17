@@ -19,9 +19,9 @@
         <p id="toast-msg" class="text-xs sm:text-sm font-bold text-white m-0">Listo</p>
     </div>
 
-    <!-- Modal Universal (Cédula Oficial / Ficha FUT / Cambio Obligatorio de Titular) -->
+    <!-- Modal Universal (Cédula Oficial / Expediente de Jugador y Cuerpo Técnico / Cambio Obligatorio de Titular) -->
     <div id="global-modal" style="display:none; position:fixed; inset:0; background:rgba(2,6,23,0.88); backdrop-filter:blur(8px); z-index:9000; padding:16px; align-items:center; justify-content:center; overflow-y:auto;">
-        <div id="global-modal-body" class="glass-panel w-full max-w-lg p-5 sm:p-6 border border-slate-700 max-h-[90vh] overflow-y-auto"></div>
+        <div id="global-modal-body" class="glass-panel w-full max-w-2xl p-5 sm:p-6 border border-slate-700 max-h-[92vh] overflow-y-auto"></div>
     </div>
 
     <!-- =========================================================================
@@ -209,6 +209,21 @@
             }
         };
 
+        var SAMPLE_DOC_SVG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">' +
+                '<rect width="480" height="300" rx="18" fill="#0F172A" stroke="#10B981" stroke-width="4"/>' +
+                '<text x="30" y="55" fill="#10B981" font-family="sans-serif" font-size="18" font-weight="bold">ÁNGEL ARENA • DOCUMENTO OFICIAL VERIFICADO</text>' +
+                '<line x1="30" y1="75" x2="450" y2="75" stroke="#334155" stroke-width="2"/>' +
+                '<rect x="30" y="95" width="110" height="140" rx="12" fill="#1E293B" stroke="#06B6D4" stroke-width="2"/>' +
+                '<text x="85" y="170" text-anchor="middle" fill="#94A3B8" font-family="sans-serif" font-size="14">FOTO / SELLO</text>' +
+                '<text x="160" y="125" fill="#F8FAFC" font-family="sans-serif" font-size="16" font-weight="bold">EXPEDIENTE DIGITAL VALIDADO</text>' +
+                '<text x="160" y="160" fill="#94A3B8" font-family="sans-serif" font-size="13">Soporte documental registrado en el sistema</text>' +
+                '<text x="160" y="190" fill="#06B6D4" font-family="monospace" font-size="13">ESTADO: APROBADO POR COMISIÓN</text>' +
+            '</svg>'
+        );
+
+        var pendingUploads = {};
+
         function createInitialData() {
             return {
                 currentUser: null,
@@ -247,6 +262,13 @@
                     { id: 'team-2', name: 'Rayo Norte FC', shortName: 'RYN', coach: 'DT. Marcelo Bielsa', color: '#06B6D4', pitchMode: '5v5', formation: '2-2' },
                     { id: 'team-3', name: 'Inter Urbano FC', shortName: 'ITU', coach: 'DT. Diego Simeone', color: '#F59E0B', pitchMode: '7v7', formation: '2-3-1' },
                     { id: 'team-4', name: 'Furia Roja FC', shortName: 'FRJ', coach: 'DT. Luis Enrique', color: '#F43F5E', pitchMode: '7v7', formation: '3-2-1' }
+                ],
+                staff: [
+                    { id: 'st-1', teamId: 'team-1', firstName: 'Ricardo', lastName: 'Gareca', name: 'Ricardo Gareca', roleTitle: 'Director Técnico', idNumber: 'V-10458921', birthDate: '1958-02-10', phone: '+58 412-5550101', joinDate: '2024-01-15', idDoc: SAMPLE_DOC_SVG, licenseDoc: SAMPLE_DOC_SVG },
+                    { id: 'st-2', teamId: 'team-1', firstName: 'Néstor', lastName: 'Bonillo', name: 'Néstor Bonillo', roleTitle: 'Preparador Físico', idNumber: 'V-12849302', birthDate: '1962-06-20', phone: '+58 412-5550102', joinDate: '2024-02-01', idDoc: SAMPLE_DOC_SVG, licenseDoc: SAMPLE_DOC_SVG },
+                    { id: 'st-3', teamId: 'team-2', firstName: 'Marcelo', lastName: 'Bielsa', name: 'Marcelo Bielsa', roleTitle: 'Director Técnico', idNumber: 'V-09384711', birthDate: '1955-07-21', phone: '+58 414-5550201', joinDate: '2024-01-10', idDoc: SAMPLE_DOC_SVG, licenseDoc: SAMPLE_DOC_SVG },
+                    { id: 'st-4', teamId: 'team-3', firstName: 'Diego', lastName: 'Simeone', name: 'Diego Simeone', roleTitle: 'Director Técnico', idNumber: 'V-11293844', birthDate: '1970-04-28', phone: '+58 424-5550301', joinDate: '2024-03-05', idDoc: SAMPLE_DOC_SVG, licenseDoc: SAMPLE_DOC_SVG },
+                    { id: 'st-5', teamId: 'team-4', firstName: 'Luis', lastName: 'Enrique', name: 'Luis Enrique', roleTitle: 'Director Técnico', idNumber: 'V-11992831', birthDate: '1970-05-08', phone: '+58 416-5550401', joinDate: '2024-02-20', idDoc: SAMPLE_DOC_SVG, licenseDoc: SAMPLE_DOC_SVG }
                 ],
                 players: [
                     // Atlético Central FC (5 titulares exactos para 5v5 + 3 suplentes en banca)
@@ -346,12 +368,16 @@
         }
 
         var db = loadDB();
+        if (!db.staff) {
+            db.staff = createInitialData().staff;
+        }
 
         function applyServerState(remoteState) {
             if (!remoteState || !remoteState.teams) return;
             db.tournaments = remoteState.tournaments || db.tournaments;
             db.teams = remoteState.teams || db.teams;
             db.players = remoteState.players || db.players;
+            if (remoteState.staff) db.staff = remoteState.staff;
             db.matches = remoteState.matches || db.matches;
             db.events = remoteState.events || db.events;
             if (db.tournaments.length > 0 && !findTournament(activeTourneyId)) {
@@ -811,8 +837,101 @@
         }
 
         // =========================================================================
-        // INTERFAZ 1: DUEÑO DE EQUIPO / DT (PIZARRA 2D 5v5 & 7v7 + BLOQUEO ESTRICTO DE TITULARES)
+        // INTERFAZ 1: DUEÑO DE EQUIPO / DT (6 VISTAS: PIZARRA 2D, PLANTEL, CUERPO TÉCNICO, MIS TORNEOS, PRÓXIMOS PARTIDOS, POSICIONES)
         // =========================================================================
+
+        function calculateAge(birthDateStr) {
+            if (!birthDateStr) return '—';
+            var parts = birthDateStr.split('-');
+            if (parts.length < 3) return '—';
+            var bYear = parseInt(parts[0], 10);
+            var bMonth = parseInt(parts[1], 10) - 1;
+            var bDay = parseInt(parts[2], 10);
+            var now = new Date();
+            var age = now.getFullYear() - bYear;
+            var m = now.getMonth() - bMonth;
+            if (m < 0 || (m === 0 && now.getDate() < bDay)) age--;
+            return (age >= 0 && age < 100) ? (age + ' años') : '—';
+        }
+
+        function findPlayerByDorsal(teamId, dorsalNum) {
+            var num = parseInt(dorsalNum, 10);
+            if (!num) return null;
+            for (var i = 0; i < db.players.length; i++) {
+                var p = db.players[i];
+                if (p.teamId === teamId && parseInt(p.number, 10) === num) {
+                    return p;
+                }
+            }
+            return null;
+        }
+
+        function getFirstFreeDorsal(teamId) {
+            for (var d = 1; d <= 99; d++) {
+                if (!findPlayerByDorsal(teamId, d)) return d;
+            }
+            return 99;
+        }
+
+        function getOccupiedDorsalsList(teamId) {
+            var nums = [];
+            for (var i = 0; i < db.players.length; i++) {
+                if (db.players[i].teamId === teamId) nums.push(db.players[i].number);
+            }
+            nums.sort(function(a, b) { return a - b; });
+            return nums;
+        }
+
+        function handleDocFileSelect(inputEl, uploadKey, statusId, previewId) {
+            if (!inputEl || !inputEl.files || !inputEl.files[0]) return;
+            var file = inputEl.files[0];
+            var reader = new FileReader();
+            reader.onload = function(evt) {
+                var rawDataUrl = evt.target.result;
+                // Comprimir imagen en canvas para rapidez y bajo peso en base de datos
+                var img = new Image();
+                img.onload = function() {
+                    var maxDim = 900;
+                    var w = img.width;
+                    var h = img.height;
+                    if (w > maxDim || h > maxDim) {
+                        if (w > h) {
+                            h = Math.round((h * maxDim) / w);
+                            w = maxDim;
+                        } else {
+                            w = Math.round((w * maxDim) / h);
+                            h = maxDim;
+                        }
+                    }
+                    var canvas = document.createElement('canvas');
+                    canvas.width = w;
+                    canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    var compressed = canvas.toDataURL('image/jpeg', 0.78);
+                    pendingUploads[uploadKey] = compressed;
+                    updateUploadPreviewUI(statusId, previewId, file.name, compressed);
+                };
+                img.onerror = function() {
+                    pendingUploads[uploadKey] = rawDataUrl;
+                    updateUploadPreviewUI(statusId, previewId, file.name, rawDataUrl);
+                };
+                img.src = rawDataUrl;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function updateUploadPreviewUI(statusId, previewId, fileName, dataUrl) {
+            var stEl = document.getElementById(statusId);
+            if (stEl) {
+                stEl.innerHTML = '<span class="text-emerald-400 font-bold">✅ Imagen cargada: ' + fileName + '</span>';
+            }
+            var prEl = document.getElementById(previewId);
+            if (prEl) {
+                prEl.src = dataUrl;
+                prEl.style.display = 'block';
+            }
+        }
 
         function renderClubDashboard() {
             var club = findTeam(db.currentUser.teamId);
@@ -831,6 +950,20 @@
                 }
             }
 
+            var clubStaffList = [];
+            if (db.staff) {
+                for (var sIdx = 0; sIdx < db.staff.length; sIdx++) {
+                    if (db.staff[sIdx].teamId === club.id) clubStaffList.push(db.staff[sIdx]);
+                }
+            }
+
+            var enrolledTourneys = [];
+            for (var tIdx = 0; tIdx < db.tournaments.length; tIdx++) {
+                if (db.tournaments[tIdx].teamIds.indexOf(club.id) !== -1) {
+                    enrolledTourneys.push(db.tournaments[tIdx]);
+                }
+            }
+
             var isFull = (starters.length >= maxStarters);
             var modeFormations = PITCH_FORMATIONS[club.pitchMode] || PITCH_FORMATIONS['5v5'];
             var formKeys = Object.keys(modeFormations);
@@ -840,31 +973,40 @@
             var coords = modeFormations[club.formation];
             var selectedPlayer = selectedPitchStarterId ? findPlayer(selectedPitchStarterId) : null;
 
-            // Cabecera del Club
+            // Cabecera del Club con las 6 Vistas Solicitadas
             var html = '' +
                 '<div class="space-y-5">' +
-                    '<header class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-col lg:flex-row lg:items-center justify-between gap-4">' +
-                        '<div class="flex items-center gap-3.5">' +
-                            '<div class="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-slate-950 text-lg shrink-0" style="background:' + club.color + '">' + club.shortName + '</div>' +
-                            '<div>' +
-                                '<div class="flex flex-wrap items-center gap-2">' +
-                                    '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase">Sesión Exclusiva • Club</span>' +
-                                    '<span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-bold uppercase">Cancha ' + club.pitchMode + ' (' + starters.length + '/' + maxStarters + ' Titulares)</span>' +
+                    '<header class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-col gap-4">' +
+                        '<div class="flex flex-wrap items-center justify-between gap-4">' +
+                            '<div class="flex items-center gap-3.5">' +
+                                '<div class="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-slate-950 text-lg shrink-0" style="background:' + club.color + '">' + club.shortName + '</div>' +
+                                '<div>' +
+                                    '<div class="flex flex-wrap items-center gap-2">' +
+                                        '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase">Panel Oficial del Club</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-bold uppercase">Cancha ' + club.pitchMode + ' (' + starters.length + '/' + maxStarters + ' Titulares)</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-bold uppercase">' + enrolledTourneys.length + ' Torneo(s) Inscrito(s)</span>' +
+                                    '</div>' +
+                                    '<h1 class="text-xl sm:text-2xl font-black text-white m-0 mt-0.5">' + club.name + '</h1>' +
+                                    '<p class="text-xs text-slate-400 m-0">' + db.currentUser.name + ' • Plantel: ' + roster.length + ' jugadores • Cuerpo Técnico: ' + clubStaffList.length + ' integrantes</p>' +
                                 '</div>' +
-                                '<h1 class="text-xl sm:text-2xl font-black text-white m-0 mt-0.5">' + club.name + '</h1>' +
-                                '<p class="text-xs text-slate-400 m-0">' + db.currentUser.name + ' • Plantilla: ' + roster.length + ' jugadores</p>' +
+                            '</div>' +
+                            '<div class="flex items-center gap-2">' +
+                                '<button onclick="openNewPlayerModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">+ Inscribir Jugador</button>' +
+                                '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
                             '</div>' +
                         '</div>' +
-                        '<div class="flex flex-wrap items-center gap-2">' +
-                            '<button onclick="clubSection=\'pitch\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'pitch' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">⚽ Pizarra 2D & Plantilla</button>' +
-                            '<button onclick="clubSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'tournaments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Convocatorias Torneos</button>' +
-                            '<button onclick="clubSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'calendar' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Calendario & Resultados</button>' +
-                            '<button onclick="clubSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'standings' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Tabla</button>' +
-                            '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
+                        '<!-- Barra de Navegación del Dueño del Club (6 Vistas) -->' +
+                        '<div class="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800/80">' +
+                            '<button onclick="clubSection=\'pitch\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'pitch' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">⚽ Pizarra 2D</button>' +
+                            '<button onclick="clubSection=\'squad\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'squad' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👥 Ver Plantel (' + roster.length + ')</button>' +
+                            '<button onclick="clubSection=\'staff\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'staff' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👔 Cuerpo Técnico (' + clubStaffList.length + ')</button>' +
+                            '<button onclick="clubSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'tournaments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Mis Torneos (' + enrolledTourneys.length + ')</button>' +
+                            '<button onclick="clubSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'calendar' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Próximos Partidos</button>' +
+                            '<button onclick="clubSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'standings' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Posiciones de Mis Torneos</button>' +
                         '</div>' +
                     '</header>';
 
-            // SECCIÓN 1: PIZARRA 2D (5v5 y 7v7) + ALINEACIÓN CON BLOQUEO DE LÍMITE
+            // VISTA 1: PIZARRA 2D (5v5 y 7v7) + ALINEACIÓN RÁPIDA
             if (clubSection === 'pitch') {
                 var formButtons = '';
                 for (var f = 0; f < formKeys.length; f++) {
@@ -873,7 +1015,6 @@
                         (club.formation === fk ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-black' : 'bg-slate-900 text-slate-300 border-slate-800') + '">' + fk + '</button>';
                 }
 
-                // Tokens de jugadores en cancha 2D
                 var pitchTokensHtml = '';
                 for (var cIdx = 0; cIdx < coords.length; cIdx++) {
                     var slot = coords[cIdx];
@@ -901,7 +1042,6 @@
                     }
                 }
 
-                // Filas de la plantilla
                 var rosterRowsHtml = '';
                 for (var r = 0; r < roster.length; r++) {
                     var pl = roster[r];
@@ -910,7 +1050,7 @@
 
                     if (pl.starter) {
                         actionBtn = '<button onclick="togglePlayerStarter(\'' + pl.id + '\')" class="px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-rose-500/20 text-emerald-300 hover:text-rose-300 border border-emerald-500/40 text-xs font-extrabold cursor-pointer">' +
-                            '★ Titular (Quitar de cancha)' +
+                            '★ Titular (Quitar)' +
                         '</button>';
                     } else if (selectedPlayer) {
                         actionBtn = '<button onclick="swapStarterWithSub(\'' + selectedPlayer.id + '\', \'' + pl.id + '\')" class="px-2.5 py-1.5 rounded-xl bg-amber-500 text-slate-950 border-0 text-xs font-black cursor-pointer">' +
@@ -918,7 +1058,7 @@
                         '</button>';
                     } else if (isFull) {
                         actionBtn = '<button onclick="togglePlayerStarter(\'' + pl.id + '\')" class="px-2.5 py-1.5 rounded-xl bg-slate-900 text-amber-400 border border-amber-500/40 text-xs font-bold cursor-pointer">' +
-                            '🔒 Suplente (Hacer Cambio)' +
+                            '🔒 Suplente (Cambio)' +
                         '</button>';
                     } else {
                         actionBtn = '<button onclick="togglePlayerStarter(\'' + pl.id + '\')" class="px-2.5 py-1.5 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">' +
@@ -928,15 +1068,20 @@
 
                     rosterRowsHtml += '<tr class="border-b border-slate-800/70 ' + (pl.starter ? 'bg-emerald-500/5' : '') + '">' +
                         '<td class="py-2.5 pl-2 font-mono font-bold text-emerald-400">#' + pl.number + '</td>' +
-                        '<td class="py-2.5 font-bold text-white">' + pl.name + ' <span class="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-400 font-mono text-[10px]">' + pl.pos + '</span></td>' +
+                        '<td class="py-2.5 font-bold text-white">' +
+                            pl.name + ' <span class="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-400 font-mono text-[10px]">' + pl.pos + '</span>' +
+                            (pl.hasSpecialCondition ? ' <span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">⚕️ Cond. Especial</span>' : '') +
+                        '</td>' +
                         '<td class="py-2.5 text-center font-mono text-xs text-amber-400 font-bold">' + goals + ' ⚽</td>' +
-                        '<td class="py-2.5 text-right pr-2">' + actionBtn + '</td>' +
+                        '<td class="py-2.5 text-right pr-2 space-x-1">' +
+                            '<button onclick="openPlayerDossierModal(\'' + pl.id + '\')" class="px-2 py-1.5 rounded-xl bg-slate-800 text-slate-200 text-[11px] font-bold border-0 cursor-pointer">📄 Ficha</button>' +
+                            actionBtn +
+                        '</td>' +
                     '</tr>';
                 }
 
                 html += '' +
                     '<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">' +
-                        '<!-- PIZARRA TÁCTICA 2D INTERACTIVA -->' +
                         '<div class="lg:col-span-5 glass-panel p-4 sm:p-5 border border-emerald-500/30 space-y-3.5">' +
                             '<div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">' +
                                 '<div>' +
@@ -948,7 +1093,6 @@
                                     '<button onclick="switchClubPitchMode(\'7v7\')" class="px-2.5 py-1 rounded-lg text-xs font-extrabold cursor-pointer border-0 ' + (club.pitchMode === '7v7' ? 'bg-cyan-500 text-slate-950' : 'bg-transparent text-slate-400') + '">🏟️ 7v7 (7)</button>' +
                                 '</div>' +
                             '</div>' +
-
                             '<div class="flex flex-wrap items-center justify-between gap-2">' +
                                 '<div class="flex items-center gap-1.5">' +
                                     '<span class="text-xs text-slate-400 font-bold">Formación:</span>' + formButtons +
@@ -957,7 +1101,6 @@
                                     (isFull ? ('🔒 ' + starters.length + '/' + maxStarters + ' COMPLETA') : ('⚠️ ' + starters.length + '/' + maxStarters + ' EN CANCHA')) +
                                 '</span>' +
                             '</div>' +
-
                             (selectedPlayer ? (
                                 '<div class="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-between gap-2 text-xs">' +
                                     '<div>' +
@@ -972,13 +1115,10 @@
                                     '<button onclick="resetPitchPositions()" class="text-cyan-400 font-bold underline bg-transparent border-0 cursor-pointer ml-2">Resetear</button>' +
                                 '</div>'
                             )) +
-
-                            '<!-- CÉSPED 2D -->' +
                             '<div id="pitch-surface" onclick="onPitchSurfaceClick(event)" class="pitch-2d pitch-stripes w-full" style="height:390px;">' +
                                 '<div style="position:absolute; top:8px; left:10px; pointer-events:none;" class="px-2 py-0.5 rounded bg-slate-950/60 text-[10px] font-mono font-bold text-white/80">' +
                                     club.pitchMode + ' • Esquema ' + club.formation +
                                 '</div>' +
-                                '<!-- Áreas y líneas de cancha -->' +
                                 '<div style="position:absolute; top:0; left:22%; right:22%; height:56px; border:2px solid rgba(255,255,255,0.3); border-top:0; pointer-events:none;"></div>' +
                                 '<div style="position:absolute; top:50%; left:0; right:0; border-top:2px solid rgba(255,255,255,0.3); pointer-events:none;"></div>' +
                                 '<div style="position:absolute; top:50%; left:50%; width:76px; height:76px; transform:translate(-50%,-50%); border:2px solid rgba(255,255,255,0.3); border-radius:999px; pointer-events:none;"></div>' +
@@ -986,8 +1126,6 @@
                                 pitchTokensHtml +
                             '</div>' +
                         '</div>' +
-
-                        '<!-- LISTA DE PLANTILLA Y FICHAJE -->' +
                         '<div class="lg:col-span-7 space-y-5">' +
                             '<div class="glass-panel p-4 sm:p-5 border border-slate-800 space-y-3">' +
                                 '<div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">' +
@@ -995,10 +1133,11 @@
                                         '<h3 class="text-base font-black text-white m-0">📋 Alineación y Banca de ' + club.name + '</h3>' +
                                         '<p class="text-xs text-slate-400 m-0">' +
                                             (isFull
-                                                ? '🔒 Formación completa (' + starters.length + '/' + maxStarters + '). Para ingresar a un suplente debes quitar primero a un titular o pulsar "Suplente (Hacer Cambio)".'
+                                                ? '🔒 Formación completa (' + starters.length + '/' + maxStarters + '). Para ingresar a un suplente debes quitar primero a un titular o pulsar "Suplente (Cambio)".'
                                                 : 'Tienes ' + (maxStarters - starters.length) + ' cupo(s) disponible(s) en la cancha.') +
                                         '</p>' +
                                     '</div>' +
+                                    '<button onclick="openNewPlayerModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">➕ Inscribir Jugador con Documentos</button>' +
                                 '</div>' +
                                 '<div class="overflow-x-auto">' +
                                     '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
@@ -1007,79 +1146,339 @@
                                                 '<th class="py-2 pl-2">#</th>' +
                                                 '<th class="py-2">Jugador</th>' +
                                                 '<th class="py-2 text-center">Goles</th>' +
-                                                '<th class="py-2 text-right pr-2">Estado en Cancha (' + club.pitchMode + ')</th>' +
+                                                '<th class="py-2 text-right pr-2">Acciones (' + club.pitchMode + ')</th>' +
                                             '</tr>' +
                                         '</thead>' +
                                         '<tbody>' + rosterRowsHtml + '</tbody>' +
                                     '</table>' +
                                 '</div>' +
                             '</div>' +
-
-                            '<!-- Agregar Jugador -->' +
-                            '<div class="glass-panel p-4 sm:p-5 border border-slate-800 space-y-3">' +
-                                '<h3 class="text-sm font-black text-white m-0">➕ Fichar Nuevo Jugador en ' + club.shortName + '</h3>' +
-                                '<form onsubmit="handleAddClubPlayer(event)" class="grid grid-cols-1 sm:grid-cols-4 gap-2.5">' +
-                                    '<input type="text" id="new-pl-name" required placeholder="Nombre del Jugador" class="fallback-input sm:col-span-2">' +
-                                    '<input type="number" id="new-pl-num" required min="1" max="99" value="18" placeholder="Dorsal" class="fallback-input">' +
-                                    '<select id="new-pl-pos" class="fallback-input">' +
-                                        '<option value="POR">POR</option>' +
-                                        '<option value="DEF">DEF</option>' +
-                                        '<option value="MED" selected>MED</option>' +
-                                        '<option value="DEL">DEL</option>' +
-                                    '</select>' +
-                                    '<button type="submit" class="btn-primary-gradient py-2.5 text-xs sm:col-span-4">Agregar Jugador al Equipo</button>' +
-                                '</form>' +
-                            '</div>' +
                         '</div>' +
                     '</div>';
             }
 
-            // SECCIÓN 2: CONVOCATORIAS DE TORNEOS PUBLICADOS POR EL ORGANIZADOR
+            // VISTA 2: VER PLANTEL COMPLETO (CON EXPEDIENTES, DOCUMENTOS Y REGISTRO)
+            if (clubSection === 'squad') {
+                html += renderClubSquadSection(club, roster);
+            }
+
+            // VISTA 3: CUERPO TÉCNICO (CON DOCUMENTOS PERTINENTES)
+            if (clubSection === 'staff') {
+                html += renderClubStaffSection(club, clubStaffList);
+            }
+
+            // VISTA 4: MIS TORNEOS CONECTADOS Y CONVOCATORIAS ABIERTAS
             if (clubSection === 'tournaments') {
-                var tourneyCards = '';
-                for (var tIdx = 0; tIdx < db.tournaments.length; tIdx++) {
-                    var tr = db.tournaments[tIdx];
-                    var joined = (tr.teamIds.indexOf(club.id) !== -1);
-                    tourneyCards += '<div class="glass-panel p-5 border ' + (joined ? 'border-emerald-500/50' : 'border-slate-800') + ' space-y-3">' +
-                        '<div class="flex items-center justify-between">' +
-                            '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">Modalidad ' + tr.pitchSize + '</span>' +
-                            '<span class="px-2.5 py-0.5 rounded font-bold text-xs ' + (joined ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400') + '">' +
-                                (joined ? '✓ INSCRITO' : 'CONVOCATORIA ABIERTA') +
-                            '</span>' +
-                        '</div>' +
-                        '<h3 class="text-lg font-black text-white m-0">' + tr.name + '</h3>' +
-                        '<p class="text-xs text-slate-300 m-0">Formato: ' + tr.format + ' • Inicio: ' + tr.startDate + ' • Premio: <strong class="text-amber-400">' + tr.prize + '</strong></p>' +
-                        '<div class="text-xs text-slate-400">Clubes inscritos: <strong class="text-white">' + tr.teamIds.length + ' / ' + tr.maxTeams + '</strong></div>' +
-                        '<div class="pt-2">' +
-                            (joined
-                                ? '<button onclick="toggleClubInTournament(\'' + tr.id + '\')" class="w-full py-2.5 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Retirar Inscripción de ' + club.shortName + '</button>'
-                                : '<button onclick="toggleClubInTournament(\'' + tr.id + '\')" class="btn-primary-gradient w-full py-2.5 text-xs font-black">✅ Unirse a este Torneo con ' + club.name + '</button>'
-                            ) +
-                        '</div>' +
-                    '</div>';
-                }
-
-                html += '<div class="space-y-4">' +
-                    '<div class="glass-panel p-4 border border-slate-800">' +
-                        '<h2 class="text-base font-black text-white m-0">🏆 Convocatorias de Torneos del Organizador</h2>' +
-                        '<p class="text-xs text-slate-400 m-0">Aquí aparecen todos los torneos creados por el organizador para que decidas a cuáles unirte.</p>' +
-                    '</div>' +
-                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' + tourneyCards + '</div>' +
-                '</div>';
+                html += renderClubTournamentsSection(club);
             }
 
-            // SECCIÓN 3: CALENDARIO Y RESULTADOS DE TODOS LOS PARTIDOS
+            // VISTA 5: PRÓXIMOS PARTIDOS EN MIS TORNEOS Y RESULTADOS
             if (clubSection === 'calendar') {
-                html += renderTournamentBarHtml() + renderMatchesGridHtml(activeTourneyId);
+                html += renderClubMatchesSection(club);
             }
 
-            // SECCIÓN 4: TABLA DE POSICIONES
+            // VISTA 6: POSICIONES DE TODOS LOS TORNEOS EN LOS QUE ESTÁ INSCRITO
             if (clubSection === 'standings') {
-                html += renderTournamentBarHtml() + renderStandingsTableHtml(activeTourneyId);
+                html += renderClubStandingsSection(club);
             }
 
             html += '</div>';
             return html;
+        }
+
+        function renderClubSquadSection(club, roster) {
+            var occupiedDorsals = getOccupiedDorsalsList(club.id);
+            var rows = '';
+            for (var i = 0; i < roster.length; i++) {
+                var p = roster[i];
+                var bDate = p.birthDate || '2006-05-14';
+                var ageText = calculateAge(bDate);
+                var idNum = p.idNumber || 'Sin cédula (Menor)';
+                var joinDate = p.schoolJoinDate || '2024-03-01';
+                var repId = p.repIdNumber || 'No registrada';
+                var hasDoc = Boolean(p.birthCertDoc || p.playerIdDoc || p.repIdDoc);
+
+                rows += '<tr class="border-b border-slate-800/70 hover:bg-slate-900/50">' +
+                    '<td class="py-3 pl-2 font-mono font-black text-emerald-400 text-sm">#' + p.number + '</td>' +
+                    '<td class="py-3">' +
+                        '<div class="font-bold text-white text-xs sm:text-sm">' + p.name + ' <span class="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-400 font-mono text-[10px]">' + p.pos + '</span></div>' +
+                        '<div class="text-[11px] text-slate-400">Cédula: <strong class="text-slate-200">' + idNum + '</strong> • Rep: ' + repId + '</div>' +
+                    '</td>' +
+                    '<td class="py-3 text-xs text-slate-300">' +
+                        '<div>' + bDate + '</div>' +
+                        '<div class="text-[10px] text-emerald-400 font-bold">' + ageText + '</div>' +
+                    '</td>' +
+                    '<td class="py-3 text-xs text-slate-300 font-mono">' + joinDate + '</td>' +
+                    '<td class="py-3 text-xs">' +
+                        (p.hasSpecialCondition
+                            ? '<span class="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold text-[11px]">⚕️ Sí: ' + (p.specialConditionDetail || 'Registrada') + '</span>'
+                            : '<span class="text-slate-400 text-[11px]">Ninguna</span>') +
+                    '</td>' +
+                    '<td class="py-3 text-xs">' +
+                        '<span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">' +
+                            (hasDoc ? '📎 Docs Cargados' : '📎 Ficha Base') +
+                        '</span>' +
+                    '</td>' +
+                    '<td class="py-3 text-right pr-2">' +
+                        '<button onclick="openPlayerDossierModal(\'' + p.id + '\')" class="px-3 py-1.5 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">📄 Ver Expediente / Docs</button>' +
+                    '</td>' +
+                '</tr>';
+            }
+
+            return '<div class="space-y-4">' +
+                '<div class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">' +
+                    '<div>' +
+                        '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Registro Oficial de Jugadores y Documentos</span>' +
+                        '<h2 class="text-lg font-black text-white m-0">👥 Plantel Oficial de ' + club.name + ' (' + roster.length + ' jugadores)</h2>' +
+                        '<p class="text-xs text-slate-400 m-0 mt-0.5">Dorsales ocupados actualmente: <strong class="text-amber-400 font-mono">' + (occupiedDorsals.length ? ('#' + occupiedDorsals.join(', #')) : 'Ninguno') + '</strong></p>' +
+                    '</div>' +
+                    '<button onclick="openNewPlayerModal()" class="btn-primary-gradient px-4 py-2.5 text-xs sm:text-sm font-black">➕ Inscribir Nuevo Jugador (Con Documentos)</button>' +
+                '</div>' +
+                '<div class="glass-panel p-4 sm:p-5 border border-slate-800 overflow-x-auto">' +
+                    '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
+                        '<thead>' +
+                            '<tr class="border-b border-slate-800 text-[11px] uppercase text-slate-400">' +
+                                '<th class="py-2 pl-2">Dorsal</th>' +
+                                '<th class="py-2">Nombres y Apellidos / Cédula</th>' +
+                                '<th class="py-2">Fecha Nac. / Edad</th>' +
+                                '<th class="py-2">Ingreso Escuela</th>' +
+                                '<th class="py-2">Condición Especial</th>' +
+                                '<th class="py-2">Documentos</th>' +
+                                '<th class="py-2 text-right pr-2">Expediente</th>' +
+                            '</tr>' +
+                        '</thead>' +
+                        '<tbody>' + rows + '</tbody>' +
+                    '</table>' +
+                '</div>' +
+            '</div>';
+        }
+
+        function renderClubStaffSection(club, staffList) {
+            var cards = '';
+            for (var i = 0; i < staffList.length; i++) {
+                var st = staffList[i];
+                cards += '<div class="glass-panel p-4 sm:p-5 border border-slate-800 flex flex-col justify-between gap-3">' +
+                    '<div class="space-y-2">' +
+                        '<div class="flex items-center justify-between gap-2">' +
+                            '<span class="px-2.5 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] font-extrabold uppercase">' + st.roleTitle + '</span>' +
+                            '<span class="text-xs font-mono text-slate-400">C.I: <strong class="text-white">' + st.idNumber + '</strong></span>' +
+                        '</div>' +
+                        '<h3 class="text-base font-black text-white m-0">' + (st.name || (st.firstName + ' ' + st.lastName)) + '</h3>' +
+                        '<div class="grid grid-cols-2 gap-2 text-xs text-slate-300 bg-slate-900/80 p-3 rounded-xl border border-slate-800">' +
+                            '<div><span class="text-slate-500 block text-[10px] uppercase">Fecha Nac.</span>' + (st.birthDate || 'Registrada') + '</div>' +
+                            '<div><span class="text-slate-500 block text-[10px] uppercase">Teléfono</span>' + (st.phone || 'Registrado') + '</div>' +
+                            '<div><span class="text-slate-500 block text-[10px] uppercase">Fecha Ingreso</span>' + (st.joinDate || '2024') + '</div>' +
+                            '<div><span class="text-slate-500 block text-[10px] uppercase">Soportes</span><span class="text-emerald-400 font-bold">✅ Cédula + Credencial</span></div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">' +
+                        '<button onclick="openStaffDossierModal(\'' + st.id + '\')" class="px-3 py-2 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">📄 Ver Documentos Adjuntos</button>' +
+                        '<button onclick="handleDeleteClubStaff(\'' + st.id + '\')" class="px-3 py-2 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/30 text-xs font-bold cursor-pointer">Eliminar</button>' +
+                    '</div>' +
+                '</div>';
+            }
+            if (!cards) {
+                cards = '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">No hay integrantes registrados en el cuerpo técnico todavía.</div>';
+            }
+
+            return '<div class="space-y-4">' +
+                '<div class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">' +
+                    '<div>' +
+                        '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Acreditación Oficial de Banquillo</span>' +
+                        '<h2 class="text-lg font-black text-white m-0">👔 Cuerpo Técnico de ' + club.name + '</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Registra al Director Técnico, Asistentes, Preparador Físico, Médico o Delegado adjuntando sus documentos obligatorios.</p>' +
+                    '</div>' +
+                    '<button onclick="openNewStaffModal()" class="btn-primary-gradient px-4 py-2.5 text-xs sm:text-sm font-black">➕ Agregar Cuerpo Técnico</button>' +
+                '</div>' +
+                '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' + cards + '</div>' +
+            '</div>';
+        }
+
+        function renderClubTournamentsSection(club) {
+            var connectedCards = '';
+            var availableCards = '';
+
+            for (var tIdx = 0; tIdx < db.tournaments.length; tIdx++) {
+                var tr = db.tournaments[tIdx];
+                var joined = (tr.teamIds.indexOf(club.id) !== -1);
+                var cardHtml = '<div class="glass-panel p-5 border ' + (joined ? 'border-emerald-500/50' : 'border-slate-800') + ' space-y-3">' +
+                    '<div class="flex items-center justify-between">' +
+                        '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">Modalidad ' + tr.pitchSize + '</span>' +
+                        '<span class="px-2.5 py-0.5 rounded font-bold text-xs ' + (joined ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400') + '">' +
+                            (joined ? '✓ CONECTADO / INSCRITO' : 'CONVOCATORIA ABIERTA') +
+                        '</span>' +
+                    '</div>' +
+                    '<h3 class="text-lg font-black text-white m-0">' + tr.name + '</h3>' +
+                    '<p class="text-xs text-slate-300 m-0">Formato: ' + tr.format + ' • Inicio: ' + tr.startDate + ' • Premio: <strong class="text-amber-400">' + tr.prize + '</strong></p>' +
+                    '<div class="text-xs text-slate-400">Clubes inscritos: <strong class="text-white">' + tr.teamIds.length + ' / ' + tr.maxTeams + '</strong></div>' +
+                    '<div class="pt-2 flex flex-wrap gap-2">' +
+                        (joined
+                            ? '<button onclick="activeTourneyId=\'' + tr.id + '\'; clubSection=\'calendar\'; renderViewport();" class="flex-1 py-2 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">📅 Ver Partidos</button>' +
+                              '<button onclick="activeTourneyId=\'' + tr.id + '\'; clubSection=\'standings\'; renderViewport();" class="flex-1 py-2 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-extrabold cursor-pointer">📊 Ver Posiciones</button>' +
+                              '<button onclick="toggleClubInTournament(\'' + tr.id + '\')" class="w-full py-2 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/30 text-xs font-bold cursor-pointer">Retirar Inscripción</button>'
+                            : '<button onclick="toggleClubInTournament(\'' + tr.id + '\')" class="btn-primary-gradient w-full py-2.5 text-xs font-black">✅ Inscribir a ' + club.name + ' en este Torneo</button>'
+                        ) +
+                    '</div>' +
+                '</div>';
+
+                if (joined) connectedCards += cardHtml;
+                else availableCards += cardHtml;
+            }
+
+            return '<div class="space-y-6">' +
+                '<div class="space-y-3">' +
+                    '<div class="glass-panel p-4 border border-emerald-500/30">' +
+                        '<h2 class="text-base font-black text-white m-0">🟢 Torneos en los que ' + club.name + ' está Conectado</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Torneos activos donde participa tu club actualmente.</p>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                        (connectedCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Tu club aún no está inscrito en ningún torneo. Únete a una convocatoria abajo.</div>') +
+                    '</div>' +
+                '</div>' +
+                '<div class="space-y-3">' +
+                    '<div class="glass-panel p-4 border border-slate-800">' +
+                        '<h2 class="text-base font-black text-white m-0">📢 Otras Convocatorias Abiertas del Organizador</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Torneos disponibles para inscribir a tu club.</p>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                        (availableCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Ya estás inscrito en todos los torneos publicados actualmente.</div>') +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+        }
+
+        function renderClubMatchesSection(club) {
+            var enrolledIds = [];
+            for (var t = 0; t < db.tournaments.length; t++) {
+                if (db.tournaments[t].teamIds.indexOf(club.id) !== -1) {
+                    enrolledIds.push(db.tournaments[t].id);
+                }
+            }
+
+            var myNextHtml = '';
+            var myFinishedHtml = '';
+            var otherTourneyMatchesHtml = '';
+
+            for (var i = 0; i < db.matches.length; i++) {
+                var m = db.matches[i];
+                var isEnrolledTourney = (enrolledIds.indexOf(m.tournamentId) !== -1);
+                var isMyMatch = (m.homeId === club.id || m.awayId === club.id);
+                if (!isEnrolledTourney && !isMyMatch) continue;
+
+                var tour = findTournament(m.tournamentId);
+                var h = findTeam(m.homeId);
+                var a = findTeam(m.awayId);
+
+                var card = '<div onclick="openMatchReportModal(\'' + m.id + '\')" class="glass-panel p-4 border ' + (isMyMatch ? 'border-emerald-500/40' : 'border-slate-800') + ' hover:border-emerald-400 cursor-pointer space-y-2.5">' +
+                    '<div class="flex items-center justify-between text-[10px] font-mono">' +
+                        '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-bold">' + (tour ? tour.name : 'Torneo') + '</span>' +
+                        '<span class="px-2 py-0.5 rounded font-bold ' + (m.status === 'live' ? 'bg-emerald-500/20 text-emerald-400' : m.status === 'finished' ? 'bg-slate-800 text-slate-300' : 'bg-amber-500/20 text-amber-300') + '">' +
+                            (m.status === 'live' ? ('🔴 EN VIVO ' + m.minute + '\'') : m.status === 'finished' ? 'FINALIZADO' : 'PRÓXIMO PARTIDO') +
+                        '</span>' +
+                    '</div>' +
+                    '<div class="text-xs text-cyan-400 font-mono font-bold">' + m.round + ' • ' + m.date + ' • ' + m.pitch + '</div>' +
+                    '<div class="grid grid-cols-3 items-center text-center py-1">' +
+                        '<div class="text-left font-bold text-xs sm:text-sm ' + (h.id === club.id ? 'text-emerald-400' : 'text-white') + '">' + h.name + '</div>' +
+                        '<div class="font-mono text-lg font-black text-white">' + (m.status === 'scheduled' ? 'VS' : (m.homeScore + ' : ' + m.awayScore)) + '</div>' +
+                        '<div class="text-right font-bold text-xs sm:text-sm ' + (a.id === club.id ? 'text-emerald-400' : 'text-white') + '">' + a.name + '</div>' +
+                    '</div>' +
+                    '<div class="text-[11px] text-emerald-400 font-bold text-right">📄 Ver Acta / Detalles →</div>' +
+                '</div>';
+
+                if (isMyMatch && (m.status === 'scheduled' || m.status === 'live')) {
+                    myNextHtml += card;
+                } else if (isMyMatch && m.status === 'finished') {
+                    myFinishedHtml += card;
+                } else {
+                    otherTourneyMatchesHtml += card;
+                }
+            }
+
+            return '<div class="space-y-6">' +
+                '<div class="space-y-3">' +
+                    '<div class="glass-panel p-4 border border-emerald-500/30">' +
+                        '<h2 class="text-base font-black text-white m-0">⚡ Próximos Partidos y En Vivo de ' + club.name + '</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Compromisos pendientes o en juego de tu club en los torneos donde estás inscrito.</p>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                        (myNextHtml || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">No tienes partidos pendientes programados en este momento.</div>') +
+                    '</div>' +
+                '</div>' +
+                '<div class="space-y-3">' +
+                    '<div class="glass-panel p-4 border border-slate-800">' +
+                        '<h2 class="text-base font-black text-white m-0">✅ Resultados Anteriores de ' + club.name + '</h2>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                        (myFinishedHtml || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Sin partidos finalizados aún.</div>') +
+                    '</div>' +
+                '</div>' +
+                '<div class="space-y-3">' +
+                    '<div class="glass-panel p-4 border border-slate-800">' +
+                        '<h2 class="text-base font-black text-white m-0">📅 Otros Partidos de Mis Torneos</h2>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                        (otherTourneyMatchesHtml || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">No hay otros partidos registrados.</div>') +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+        }
+
+        function renderClubStandingsSection(club) {
+            var tablesHtml = '';
+            for (var i = 0; i < db.tournaments.length; i++) {
+                var t = db.tournaments[i];
+                if (t.teamIds.indexOf(club.id) === -1) continue;
+
+                var rows = getStandings(t.id);
+                var trs = '';
+                for (var j = 0; j < rows.length; j++) {
+                    var r = rows[j];
+                    var isMyClub = (r.teamId === club.id);
+                    trs += '<tr class="border-b border-slate-800/70 ' + (isMyClub ? 'bg-emerald-500/15' : '') + '">' +
+                        '<td class="py-3 pl-2 font-mono font-bold text-emerald-400">' + (j + 1) + '</td>' +
+                        '<td class="py-3 font-bold text-white">' +
+                            r.name +
+                            (isMyClub ? ' <span class="ml-1.5 px-2 py-0.5 rounded bg-emerald-500 text-slate-950 text-[10px] font-black">TU CLUB</span>' : '') +
+                        '</td>' +
+                        '<td class="py-3 text-center font-mono">' + r.pj + '</td>' +
+                        '<td class="py-3 text-center font-mono">' + r.pg + '</td>' +
+                        '<td class="py-3 text-center font-mono">' + r.pe + '</td>' +
+                        '<td class="py-3 text-center font-mono">' + r.pp + '</td>' +
+                        '<td class="py-3 text-center font-mono text-emerald-400">' + (r.dg > 0 ? ('+' + r.dg) : r.dg) + '</td>' +
+                        '<td class="py-3 text-right pr-2 font-mono font-black text-white">' + r.pts + '</td>' +
+                    '</tr>';
+                }
+
+                tablesHtml += '<div class="glass-panel p-5 border border-emerald-500/30 overflow-x-auto space-y-3">' +
+                    '<div class="flex flex-wrap items-center justify-between gap-2">' +
+                        '<div>' +
+                            '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-[10px] font-bold">Modalidad ' + t.pitchSize + ' • ' + t.format + '</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0 mt-1">📊 ' + t.name + '</h3>' +
+                        '</div>' +
+                        '<span class="text-xs text-amber-400 font-bold">Premio: ' + t.prize + '</span>' +
+                    '</div>' +
+                    '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
+                        '<thead>' +
+                            '<tr class="border-b border-slate-800 text-slate-400 uppercase text-[11px]">' +
+                                '<th class="py-2 pl-2">#</th><th class="py-2">Club</th><th class="py-2 text-center">PJ</th><th class="py-2 text-center">PG</th><th class="py-2 text-center">PE</th><th class="py-2 text-center">PP</th><th class="py-2 text-center">DG</th><th class="py-2 text-right pr-2">PTS</th>' +
+                            '</tr>' +
+                        '</thead>' +
+                        '<tbody>' + trs + '</tbody>' +
+                    '</table>' +
+                '</div>';
+            }
+
+            if (!tablesHtml) {
+                tablesHtml = '<div class="glass-panel p-6 text-center text-xs text-slate-400">Tu club aún no está inscrito en ningún torneo. Ve a la pestaña "🏆 Mis Torneos" para inscribirte.</div>';
+            }
+
+            return '<div class="space-y-5">' +
+                '<div class="glass-panel p-4 border border-slate-800">' +
+                    '<h2 class="text-base font-black text-white m-0">📊 Tablas de Posiciones de Todos Mis Torneos Inscritos</h2>' +
+                    '<p class="text-xs text-slate-400 m-0">Consulta en un solo lugar la clasificación actual de tu club en cada torneo donde compite.</p>' +
+                '</div>' +
+                tablesHtml +
+            '</div>';
         }
 
         // Lógica de Pizarra 2D y Bloqueo Estricto de Límite de Titulares (5v5 y 7v7)
@@ -1302,28 +1701,503 @@
             notify('🔄 Cambio realizado: Entra #' + subPlayer.number + ' ' + subPlayer.name + ' por #' + stPlayer.number + ' ' + stPlayer.name);
         }
 
-        function handleAddClubPlayer(e) {
-            e.preventDefault();
-            var name = document.getElementById('new-pl-name').value.trim();
-            var num = parseInt(document.getElementById('new-pl-num').value, 10) || 10;
-            var pos = document.getElementById('new-pl-pos').value;
+        function openNewPlayerModal() {
             var club = findTeam(db.currentUser.teamId);
+            pendingUploads = {};
+            var suggestedDorsal = getFirstFreeDorsal(club.id);
+            var occupied = getOccupiedDorsalsList(club.id);
 
-            db.players.push({
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Inscripción Oficial de Jugador • ' + club.name + '</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">➕ Registrar Nuevo Jugador y Expediente Documental</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+
+                    '<form onsubmit="handleCreatePlayerWithDocs(event)" class="space-y-3.5 text-xs">' +
+                        '<!-- Nombres y Apellidos -->' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Nombres del Jugador <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="pl-first-name" required placeholder="Ej: Santiago Andrés" class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Apellidos del Jugador <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="pl-last-name" required placeholder="Ej: Morales Pérez" class="fallback-input">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<!-- Fecha de Nacimiento, Fecha de Ingreso a la Escuela y Posición -->' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento <span class="text-rose-400">*</span></label>' +
+                                '<input type="date" id="pl-birth-date" required class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Ingreso a la Escuela <span class="text-rose-400">*</span></label>' +
+                                '<input type="date" id="pl-school-join" required class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Posición en Cancha <span class="text-rose-400">*</span></label>' +
+                                '<select id="pl-pos" class="fallback-input">' +
+                                    '<option value="POR">POR (Portero)</option>' +
+                                    '<option value="DEF">DEF (Defensa)</option>' +
+                                    '<option value="MED" selected>MED (Mediocampo)</option>' +
+                                    '<option value="DEL">DEL (Delantero)</option>' +
+                                '</select>' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<!-- Dorsal con Verificación en Vivo de Disponibilidad -->' +
+                        '<div class="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">' +
+                            '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">' +
+                                '<div>' +
+                                    '<label class="block font-bold text-slate-300 mb-1">Dorsal Oficial (1 - 99) <span class="text-rose-400">*</span></label>' +
+                                    '<input type="number" id="pl-dorsal" required min="1" max="99" value="' + suggestedDorsal + '" oninput="checkModalDorsalAvailability()" class="fallback-input font-mono font-bold">' +
+                                '</div>' +
+                                '<div>' +
+                                    '<div id="dorsal-live-status" class="text-xs font-bold text-emerald-400">✅ Dorsal #' + suggestedDorsal + ' disponible en ' + club.shortName + '</div>' +
+                                    '<div class="text-[11px] text-slate-400 mt-1">Ocupados en tu equipo: <span class="font-mono text-amber-300">' + (occupied.length ? ('#' + occupied.join(', #')) : 'Ninguno') + '</span></div>' +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<!-- Cédula del Jugador (Opcional) y Cédula del Representante (Opcional) -->' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">' +
+                                '<label class="block font-bold text-slate-300">Cédula del Jugador <span class="text-slate-400 font-normal">(Si la tiene)</span></label>' +
+                                '<input type="text" id="pl-id-number" placeholder="Ej: V-31450922 (Opcional)" class="fallback-input">' +
+                                '<label class="block text-[11px] text-cyan-400 font-bold pt-1">📷 Subir Foto de Cédula del Jugador (Opcional):</label>' +
+                                '<input type="file" accept="image/*" onchange="handleDocFileSelect(this, \'playerIdDoc\', \'st-pl-id-doc\', \'pr-pl-id-doc\')" class="text-[11px] text-slate-300 w-full">' +
+                                '<div id="st-pl-id-doc" class="text-[10px] text-slate-500">Opcional si el jugador posee cédula</div>' +
+                                '<img id="pr-pl-id-doc" style="display:none; max-height:90px; border-radius:8px; border:1px solid #334155;" alt="Vista previa cédula jugador">' +
+                            '</div>' +
+
+                            '<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">' +
+                                '<label class="block font-bold text-slate-300">Cédula del Representante <span class="text-slate-400 font-normal">(Opcional)</span></label>' +
+                                '<input type="text" id="pl-rep-id" placeholder="Ej: V-15890211 (Opcional)" class="fallback-input">' +
+                                '<label class="block text-[11px] text-cyan-400 font-bold pt-1">📷 Subir Foto de Cédula Representante (Opcional):</label>' +
+                                '<input type="file" accept="image/*" onchange="handleDocFileSelect(this, \'repIdDoc\', \'st-rep-id-doc\', \'pr-rep-id-doc\')" class="text-[11px] text-slate-300 w-full">' +
+                                '<div id="st-rep-id-doc" class="text-[10px] text-slate-500">Documento opcional del representante</div>' +
+                                '<img id="pr-rep-id-doc" style="display:none; max-height:90px; border-radius:8px; border:1px solid #334155;" alt="Vista previa cédula representante">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<!-- Partida de Nacimiento del Jugador (OBLIGATORIO) -->' +
+                        '<div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 space-y-2">' +
+                            '<div class="flex items-center justify-between">' +
+                                '<label class="font-black text-emerald-300 text-xs">📜 Partida de Nacimiento del Jugador <span class="text-rose-400">(OBLIGATORIO *)</span></label>' +
+                                '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">Requisito Indispensable</span>' +
+                            '</div>' +
+                            '<input type="file" id="pl-birth-cert-file" accept="image/*" required onchange="handleDocFileSelect(this, \'birthCertDoc\', \'st-birth-cert\', \'pr-birth-cert\')" class="text-xs text-slate-200 w-full">' +
+                            '<div id="st-birth-cert" class="text-[11px] text-amber-300">⚠️ Debes adjuntar la imagen de la partida de nacimiento del jugador.</div>' +
+                            '<img id="pr-birth-cert" style="display:none; max-height:120px; border-radius:10px; border:1px solid #10B981;" alt="Vista previa partida de nacimiento">' +
+                        '</div>' +
+
+                        '<!-- Condición Especial (Si la tiene -> pregunta cuál y solicita documento de soporte) -->' +
+                        '<div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">' +
+                            '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">' +
+                                '<label class="font-bold text-slate-200">⚕️ ¿El jugador tiene alguna condición especial?</label>' +
+                                '<select id="pl-has-special" onchange="toggleSpecialCondBox()" class="fallback-input">' +
+                                    '<option value="no" selected>No, ninguna condición especial</option>' +
+                                    '<option value="yes">Sí, tiene una condición especial</option>' +
+                                '</select>' +
+                            '</div>' +
+                            '<div id="special-cond-fields" style="display:none;" class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-2.5">' +
+                                '<div>' +
+                                    '<label class="block font-bold text-amber-300 mb-1">¿Cuál condición especial presenta el jugador? <span class="text-rose-400">*</span></label>' +
+                                    '<input type="text" id="pl-special-detail" placeholder="Ej: Asma controlada, alergia medicamentosa, lentes deportivos, etc." class="fallback-input">' +
+                                '</div>' +
+                                '<div>' +
+                                    '<label class="block font-bold text-amber-300 mb-1">📎 Documento de Soporte Médico / Especial <span class="text-rose-400">(Obligatorio *)</span></label>' +
+                                    '<input type="file" id="pl-special-doc-file" accept="image/*" onchange="handleDocFileSelect(this, \'specialConditionDoc\', \'st-special-doc\', \'pr-special-doc\')" class="text-xs text-slate-200 w-full">' +
+                                    '<div id="st-special-doc" class="text-[11px] text-amber-300 mt-1">Adjunta la imagen del informe o récipe de soporte.</div>' +
+                                    '<img id="pr-special-doc" style="display:none; max-height:110px; border-radius:10px; border:1px solid #F59E0B; margin-top:6px;" alt="Soporte condición especial">' +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<p id="pl-form-error" style="display:none;" class="text-xs text-rose-400 font-bold m-0"></p>' +
+
+                        '<div class="flex justify-end gap-2 pt-2">' +
+                            '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
+                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Guardar Jugador y Expediente</button>' +
+                        '</div>' +
+                    '</form>' +
+                '</div>';
+
+            modal.style.display = 'flex';
+        }
+
+        function checkModalDorsalAvailability() {
+            var club = findTeam(db.currentUser.teamId);
+            var inputEl = document.getElementById('pl-dorsal');
+            var statusEl = document.getElementById('dorsal-live-status');
+            if (!inputEl || !statusEl) return;
+            var val = parseInt(inputEl.value, 10);
+            if (!val || val < 1 || val > 99) {
+                statusEl.innerHTML = '<span class="text-rose-400">❌ Ingresa un número entre 1 y 99</span>';
+                return;
+            }
+            var existing = findPlayerByDorsal(club.id, val);
+            if (existing) {
+                statusEl.innerHTML = '<span class="text-rose-400">❌ Ocupado por <strong>' + existing.name + '</strong>. Elige otro dorsal.</span>';
+            } else {
+                statusEl.innerHTML = '<span class="text-emerald-400">✅ Dorsal #' + val + ' disponible en ' + club.shortName + '</span>';
+            }
+        }
+
+        function toggleSpecialCondBox() {
+            var sel = document.getElementById('pl-has-special');
+            var box = document.getElementById('special-cond-fields');
+            if (!sel || !box) return;
+            box.style.display = (sel.value === 'yes') ? 'block' : 'none';
+        }
+
+        function handleCreatePlayerWithDocs(e) {
+            e.preventDefault();
+            var club = findTeam(db.currentUser.teamId);
+            var errEl = document.getElementById('pl-form-error');
+            if (errEl) errEl.style.display = 'none';
+
+            var firstName = document.getElementById('pl-first-name').value.trim();
+            var lastName = document.getElementById('pl-last-name').value.trim();
+            var birthDate = document.getElementById('pl-birth-date').value;
+            var schoolJoinDate = document.getElementById('pl-school-join').value;
+            var pos = document.getElementById('pl-pos').value;
+            var dorsal = parseInt(document.getElementById('pl-dorsal').value, 10);
+            var idNumber = document.getElementById('pl-id-number').value.trim();
+            var repIdNumber = document.getElementById('pl-rep-id').value.trim();
+            var hasSpecial = (document.getElementById('pl-has-special').value === 'yes');
+            var specialDetail = document.getElementById('pl-special-detail').value.trim();
+
+            var takenBy = findPlayerByDorsal(club.id, dorsal);
+            if (takenBy) {
+                if (errEl) {
+                    errEl.textContent = '❌ El dorsal #' + dorsal + ' ya está ocupado en tu equipo por ' + takenBy.name + '. Por favor elige otro dorsal.';
+                    errEl.style.display = 'block';
+                }
+                return;
+            }
+
+            if (!pendingUploads.birthCertDoc) {
+                if (errEl) {
+                    errEl.textContent = '❌ La imagen de la Partida de Nacimiento del jugador es obligatoria.';
+                    errEl.style.display = 'block';
+                }
+                return;
+            }
+
+            if (hasSpecial && (!specialDetail || !pendingUploads.specialConditionDoc)) {
+                if (errEl) {
+                    errEl.textContent = '❌ Indicaste que el jugador tiene una condición especial: debes especificar cuál es y adjuntar la imagen del documento de soporte.';
+                    errEl.style.display = 'block';
+                }
+                return;
+            }
+
+            var fullName = (firstName + ' ' + lastName).trim();
+            var newPlayerObj = {
                 id: 'p-' + Date.now(),
                 teamId: club.id,
-                number: num,
-                name: name,
+                number: dorsal,
+                name: fullName,
+                firstName: firstName,
+                lastName: lastName,
+                birthDate: birthDate,
+                idNumber: idNumber,
+                schoolJoinDate: schoolJoinDate,
+                repIdNumber: repIdNumber,
+                hasSpecialCondition: hasSpecial,
+                specialConditionDetail: hasSpecial ? specialDetail : '',
+                birthCertDoc: pendingUploads.birthCertDoc,
+                playerIdDoc: pendingUploads.playerIdDoc || null,
+                repIdDoc: pendingUploads.repIdDoc || null,
+                specialConditionDoc: hasSpecial ? pendingUploads.specialConditionDoc : null,
                 pos: pos,
                 status: 'Disponible',
                 starter: false,
                 customX: null,
                 customY: null
-            });
+            };
+
+            db.players.push(newPlayerObj);
+            closeGlobalModal();
             saveDB();
             renderViewport();
-            apiRequest('POST', '/api/players', { name: name, number: num, pos: pos });
-            notify('✅ ' + name + ' incorporado a la banca de ' + club.shortName);
+            apiRequest('POST', '/api/players', newPlayerObj);
+            notify('✅ Jugador #' + dorsal + ' ' + fullName + ' inscrito con su expediente completo');
+        }
+
+        function openPlayerDossierModal(playerId) {
+            var p = findPlayer(playerId);
+            if (!p) return;
+            var club = findTeam(p.teamId);
+            var birthCertImg = p.birthCertDoc || SAMPLE_DOC_SVG;
+
+            var docsGrid = '' +
+                '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">' +
+                    '<div class="text-xs font-bold text-emerald-400">📜 Partida de Nacimiento (Obligatorio)</div>' +
+                    '<img src="' + birthCertImg + '" class="w-full rounded-lg border border-slate-700" style="max-height:180px; object-fit:contain; background:#020617;" alt="Partida de Nacimiento">' +
+                '</div>';
+
+            if (p.playerIdDoc) {
+                docsGrid += '' +
+                    '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">' +
+                        '<div class="text-xs font-bold text-cyan-400">🪪 Cédula del Jugador</div>' +
+                        '<img src="' + p.playerIdDoc + '" class="w-full rounded-lg border border-slate-700" style="max-height:180px; object-fit:contain; background:#020617;" alt="Cédula del Jugador">' +
+                    '</div>';
+            }
+
+            if (p.repIdDoc) {
+                docsGrid += '' +
+                    '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">' +
+                        '<div class="text-xs font-bold text-purple-300">🪪 Cédula del Representante</div>' +
+                        '<img src="' + p.repIdDoc + '" class="w-full rounded-lg border border-slate-700" style="max-height:180px; object-fit:contain; background:#020617;" alt="Cédula del Representante">' +
+                    '</div>';
+            }
+
+            if (p.hasSpecialCondition) {
+                docsGrid += '' +
+                    '<div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">' +
+                        '<div class="text-xs font-bold text-amber-300">⚕️ Soporte de Condición Especial (' + (p.specialConditionDetail || 'Registrada') + ')</div>' +
+                        '<img src="' + (p.specialConditionDoc || SAMPLE_DOC_SVG) + '" class="w-full rounded-lg border border-amber-500/40" style="max-height:180px; object-fit:contain; background:#020617;" alt="Soporte Médico">' +
+                    '</div>';
+            }
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div class="flex items-center gap-3">' +
+                            '<div class="w-12 h-12 rounded-2xl flex items-center justify-center font-mono font-black text-slate-950 text-base" style="background:' + club.color + '">#' + p.number + '</div>' +
+                            '<div>' +
+                                '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Expediente Oficial del Jugador • ' + club.name + '</span>' +
+                                '<h3 class="text-lg font-black text-white m-0">' + p.name + ' (' + p.pos + ')</h3>' +
+                            '</div>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-3 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+
+                    '<div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs bg-slate-900/90 p-4 rounded-2xl border border-slate-800">' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Nombres</span><strong class="text-white">' + (p.firstName || p.name.split(' ')[0]) + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Apellidos</span><strong class="text-white">' + (p.lastName || p.name.split(' ').slice(1).join(' ') || '—') + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Dorsal / Posición</span><strong class="text-emerald-400 font-mono">#' + p.number + ' • ' + p.pos + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Fecha de Nacimiento</span><strong class="text-white">' + (p.birthDate || '2006-05-14') + ' (' + calculateAge(p.birthDate || '2006-05-14') + ')</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Cédula del Jugador</span><strong class="text-white">' + (p.idNumber || 'No posee / Menor') + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Ingreso a la Escuela</span><strong class="text-cyan-300 font-mono">' + (p.schoolJoinDate || '2024-03-01') + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Cédula Representante</span><strong class="text-white">' + (p.repIdNumber || 'No registrada') + '</strong></div>' +
+                        '<div class="col-span-2"><span class="text-slate-500 block text-[10px] uppercase">Condición Especial</span><strong class="' + (p.hasSpecialCondition ? 'text-amber-300' : 'text-emerald-400') + '">' + (p.hasSpecialCondition ? ('⚕️ Sí: ' + p.specialConditionDetail) : 'Ninguna reportada') + '</strong></div>' +
+                    '</div>' +
+
+                    '<div class="space-y-2">' +
+                        '<span class="text-xs font-bold uppercase text-slate-400 block">Documentos y Soportes Digitalizados:</span>' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' + docsGrid + '</div>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        // =========================================================================
+        // GESTIÓN DE CUERPO TÉCNICO DEL CLUB (CON CARGA DE DOCUMENTOS)
+        // =========================================================================
+
+        function openNewStaffModal() {
+            var club = findTeam(db.currentUser.teamId);
+            pendingUploads = {};
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Acreditación Oficial • ' + club.name + '</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">👔 Agregar Integrante al Cuerpo Técnico</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+
+                    '<form onsubmit="handleCreateStaffMember(event)" class="space-y-3.5 text-xs">' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Nombres <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="stf-first" required placeholder="Ej: Carlos Eduardo" class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Apellidos <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="stf-last" required placeholder="Ej: Bianchi Soto" class="fallback-input">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Cargo en el Cuerpo Técnico <span class="text-rose-400">*</span></label>' +
+                                '<select id="stf-role" class="fallback-input">' +
+                                    '<option value="Director Técnico">Director Técnico (DT)</option>' +
+                                    '<option value="Asistente Técnico">Asistente Técnico (AT)</option>' +
+                                    '<option value="Preparador Físico">Preparador Físico (PF)</option>' +
+                                    '<option value="Entrenador de Porteros">Entrenador de Porteros</option>' +
+                                    '<option value="Fisioterapeuta / Médico">Fisioterapeuta / Médico</option>' +
+                                    '<option value="Delegado de Campo">Delegado de Campo</option>' +
+                                '</select>' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Cédula de Identidad <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="stf-id-num" required placeholder="Ej: V-12345678" class="fallback-input">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento</label>' +
+                                '<input type="date" id="stf-birth" required class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Teléfono</label>' +
+                                '<input type="text" id="stf-phone" required placeholder="+58 412-0000000" class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Ingreso</label>' +
+                                '<input type="date" id="stf-join" required class="fallback-input">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 space-y-2">' +
+                                '<label class="block font-black text-emerald-300">🪪 Imagen de Cédula de Identidad <span class="text-rose-400">(Obligatorio *)</span></label>' +
+                                '<input type="file" accept="image/*" required onchange="handleDocFileSelect(this, \'staffIdDoc\', \'st-stf-id\', \'pr-stf-id\')" class="text-xs text-slate-200 w-full">' +
+                                '<div id="st-stf-id" class="text-[11px] text-amber-300">Adjunta foto legible de la cédula.</div>' +
+                                '<img id="pr-stf-id" style="display:none; max-height:110px; border-radius:8px; border:1px solid #10B981;" alt="Cédula Cuerpo Técnico">' +
+                            '</div>' +
+
+                            '<div class="p-3.5 rounded-xl bg-cyan-500/10 border border-cyan-500/40 space-y-2">' +
+                                '<label class="block font-black text-cyan-300">📜 Credencial / Licencia / Aval Deportivo <span class="text-rose-400">(Obligatorio *)</span></label>' +
+                                '<input type="file" accept="image/*" required onchange="handleDocFileSelect(this, \'staffLicenseDoc\', \'st-stf-lic\', \'pr-stf-lic\')" class="text-xs text-slate-200 w-full">' +
+                                '<div id="st-stf-lic" class="text-[11px] text-amber-300">Adjunta certificado, licencia o carta aval del club.</div>' +
+                                '<img id="pr-stf-lic" style="display:none; max-height:110px; border-radius:8px; border:1px solid #06B6D4;" alt="Credencial Cuerpo Técnico">' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<p id="stf-form-error" style="display:none;" class="text-xs text-rose-400 font-bold m-0"></p>' +
+
+                        '<div class="flex justify-end gap-2 pt-2">' +
+                            '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
+                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Registrar en Cuerpo Técnico</button>' +
+                        '</div>' +
+                    '</form>' +
+                '</div>';
+
+            modal.style.display = 'flex';
+        }
+
+        function handleCreateStaffMember(e) {
+            e.preventDefault();
+            var club = findTeam(db.currentUser.teamId);
+            var errEl = document.getElementById('stf-form-error');
+            if (errEl) errEl.style.display = 'none';
+
+            if (!pendingUploads.staffIdDoc || !pendingUploads.staffLicenseDoc) {
+                if (errEl) {
+                    errEl.textContent = '❌ Debes adjuntar tanto la imagen de la Cédula de Identidad como la Credencial / Aval Deportivo.';
+                    errEl.style.display = 'block';
+                }
+                return;
+            }
+
+            var firstName = document.getElementById('stf-first').value.trim();
+            var lastName = document.getElementById('stf-last').value.trim();
+            var roleTitle = document.getElementById('stf-role').value;
+            var idNumber = document.getElementById('stf-id-num').value.trim();
+            var birthDate = document.getElementById('stf-birth').value;
+            var phone = document.getElementById('stf-phone').value.trim();
+            var joinDate = document.getElementById('stf-join').value;
+
+            var newStaff = {
+                id: 'st-' + Date.now(),
+                teamId: club.id,
+                firstName: firstName,
+                lastName: lastName,
+                name: (firstName + ' ' + lastName).trim(),
+                roleTitle: roleTitle,
+                idNumber: idNumber,
+                birthDate: birthDate,
+                phone: phone,
+                joinDate: joinDate,
+                idDoc: pendingUploads.staffIdDoc,
+                licenseDoc: pendingUploads.staffLicenseDoc
+            };
+
+            if (!db.staff) db.staff = [];
+            db.staff.push(newStaff);
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            apiRequest('POST', '/api/staff', newStaff);
+            notify('👔 ' + newStaff.name + ' (' + roleTitle + ') acreditado en el cuerpo técnico');
+        }
+
+        function openStaffDossierModal(staffId) {
+            var st = null;
+            if (db.staff) {
+                for (var i = 0; i < db.staff.length; i++) {
+                    if (db.staff[i].id === staffId) st = db.staff[i];
+                }
+            }
+            if (!st) return;
+            var club = findTeam(st.teamId);
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Expediente de Cuerpo Técnico • ' + club.name + '</span>' +
+                            '<h3 class="text-lg font-black text-white m-0">' + (st.name || (st.firstName + ' ' + st.lastName)) + ' — ' + st.roleTitle + '</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-3 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs bg-slate-900 p-4 rounded-2xl border border-slate-800">' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Cédula</span><strong class="text-white">' + st.idNumber + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Cargo</span><strong class="text-emerald-400">' + st.roleTitle + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Teléfono</span><strong class="text-white">' + (st.phone || '—') + '</strong></div>' +
+                        '<div><span class="text-slate-500 block text-[10px] uppercase">Ingreso</span><strong class="text-cyan-300">' + (st.joinDate || '—') + '</strong></div>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                        '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">' +
+                            '<div class="text-xs font-bold text-emerald-400">🪪 Cédula de Identidad</div>' +
+                            '<img src="' + (st.idDoc || SAMPLE_DOC_SVG) + '" class="w-full rounded-lg border border-slate-700" style="max-height:200px; object-fit:contain; background:#020617;" alt="Cédula">' +
+                        '</div>' +
+                        '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">' +
+                            '<div class="text-xs font-bold text-cyan-400">📜 Credencial / Licencia / Aval</div>' +
+                            '<img src="' + (st.licenseDoc || SAMPLE_DOC_SVG) + '" class="w-full rounded-lg border border-slate-700" style="max-height:200px; object-fit:contain; background:#020617;" alt="Credencial">' +
+                        '</div>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function handleDeleteClubStaff(staffId) {
+            if (!db.staff) return;
+            for (var i = 0; i < db.staff.length; i++) {
+                if (db.staff[i].id === staffId) {
+                    db.staff.splice(i, 1);
+                    break;
+                }
+            }
+            saveDB();
+            renderViewport();
+            apiRequest('DELETE', '/api/staff/' + staffId);
+            notify('🗑️ Integrante retirado del cuerpo técnico');
         }
 
         function toggleClubInTournament(tourneyId) {

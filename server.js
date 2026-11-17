@@ -44,7 +44,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_cambiar
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Extrae el ID numérico tanto de 'team-1' / 'p-5' como de '1' / 1
@@ -58,9 +58,42 @@ function parseId(raw) {
 // ==========================================
 // INICIALIZACIÓN AUTOMÁTICA Y SEED DE POSTGRESQL
 // ==========================================
+async function seedInitialStaff(client) {
+  const sampleDocSvg =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">' +
+        '<rect width="480" height="300" rx="18" fill="#0F172A" stroke="#10B981" stroke-width="4"/>' +
+        '<text x="30" y="55" fill="#10B981" font-family="sans-serif" font-size="18" font-weight="bold">ÁNGEL ARENA • DOCUMENTO OFICIAL VERIFICADO</text>' +
+        '<line x1="30" y1="75" x2="450" y2="75" stroke="#334155" stroke-width="2"/>' +
+        '<rect x="30" y="95" width="110" height="140" rx="12" fill="#1E293B" stroke="#06B6D4" stroke-width="2"/>' +
+        '<text x="85" y="170" text-anchor="middle" fill="#94A3B8" font-family="sans-serif" font-size="14">FOTO / SELLO</text>' +
+        '<text x="160" y="125" fill="#F8FAFC" font-family="sans-serif" font-size="16" font-weight="bold">EXPEDIENTE DIGITAL VALIDADO</text>' +
+        '<text x="160" y="160" fill="#94A3B8" font-family="sans-serif" font-size="13">Soporte documental registrado en el sistema</text>' +
+        '<text x="160" y="190" fill="#06B6D4" font-family="monospace" font-size="13">ESTADO: APROBADO POR COMISIÓN</text>' +
+      '</svg>'
+    );
+
+  const initialStaff = [
+    [1, 'Ricardo', 'Gareca', 'Director Técnico', 'V-10458921', '1958-02-10', '+58 412-5550101', '2024-01-15'],
+    [1, 'Néstor', 'Bonillo', 'Preparador Físico', 'V-12849302', '1962-06-20', '+58 412-5550102', '2024-02-01'],
+    [2, 'Marcelo', 'Bielsa', 'Director Técnico', 'V-09384711', '1955-07-21', '+58 414-5550201', '2024-01-10'],
+    [3, 'Diego', 'Simeone', 'Director Técnico', 'V-11293844', '1970-04-28', '+58 424-5550301', '2024-03-05'],
+    [4, 'Luis', 'Enrique', 'Director Técnico', 'V-11992831', '1970-05-08', '+58 416-5550401', '2024-02-20']
+  ];
+
+  for (const [teamId, firstName, lastName, roleTitle, idNum, birthDate, phone, joinDate] of initialStaff) {
+    await client.query(
+      `INSERT INTO club_staff (team_id, first_name, last_name, role_title, id_number, birth_date, phone, join_date, id_doc, license_doc)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [teamId, firstName, lastName, roleTitle, idNum, birthDate, phone, joinDate, sampleDocSvg, sampleDocSvg]
+    );
+  }
+}
+
 async function seedDemoData(client) {
   await client.query(`
-    TRUNCATE TABLE match_events, matches, players, tournament_registrations, tournaments, teams, users, audit_logs
+    TRUNCATE TABLE match_events, matches, club_staff, players, tournament_registrations, tournaments, teams, users, audit_logs
     RESTART IDENTITY CASCADE
   `);
 
@@ -147,12 +180,19 @@ async function seedDemoData(client) {
   ];
 
   for (const [teamId, fullName, dorsal, pos, isStarter, goals, sortOrder] of initialPlayers) {
+    const parts = fullName.split(' ');
+    const firstName = parts[0] || fullName;
+    const lastName = parts.slice(1).join(' ') || 'Jugador';
     await client.query(
-      `INSERT INTO players (team_id, full_name, dorsal, position, status, is_starter, coord_x, coord_y, goals, sort_order)
-       VALUES ($1, $2, $3, $4, 'Disponible', $5, NULL, NULL, $6, $7)`,
-      [teamId, fullName, dorsal, pos, isStarter, goals, sortOrder]
+      `INSERT INTO players (
+        team_id, full_name, first_name, last_name, birth_date, id_number, school_join_date, rep_id_number,
+        has_special_condition, special_condition_detail, dorsal, position, status, is_starter, coord_x, coord_y, goals, sort_order
+      ) VALUES ($1, $2, $3, $4, '2006-05-14', $5, '2024-03-01', 'V-14829100', FALSE, NULL, $6, $7, 'Disponible', $8, NULL, NULL, $9, $10)`,
+      [teamId, fullName, firstName, lastName, `V-2810${teamId}${String(dorsal).padStart(2, '0')}`, dorsal, pos, isStarter, goals, sortOrder]
     );
   }
+
+  await seedInitialStaff(client);
 
   // 6. Partidos (IDs 1..5)
   await client.query(`
@@ -194,6 +234,18 @@ async function initDatabase() {
       // Migraciones seguras por si las tablas ya existían de una versión previa
       await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS short_name VARCHAR(10) NOT NULL DEFAULT 'CLB'`);
       await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS first_name VARCHAR(80)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS last_name VARCHAR(80)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_date VARCHAR(25)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS id_number VARCHAR(30)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS school_join_date VARCHAR(25)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS rep_id_number VARCHAR(30)`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS has_special_condition BOOLEAN DEFAULT FALSE`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS special_condition_detail TEXT`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_cert_doc TEXT`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS player_id_doc TEXT`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS rep_id_doc TEXT`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS special_condition_doc TEXT`);
       await client.query(`ALTER TABLE players ALTER COLUMN coord_x DROP DEFAULT`);
       await client.query(`ALTER TABLE players ALTER COLUMN coord_y DROP DEFAULT`);
       await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
@@ -205,6 +257,10 @@ async function initDatabase() {
         await client.query('COMMIT');
         console.log('✅ Base de datos PostgreSQL inicializada con datos demo de Ángel Arena.');
       } else {
+        const staffCountRes = await client.query('SELECT COUNT(*) FROM club_staff');
+        if (parseInt(staffCountRes.rows[0].count, 10) === 0) {
+          await seedInitialStaff(client);
+        }
         console.log('✅ Base de datos PostgreSQL conectada y lista.');
       }
       dbReady = true;
@@ -233,11 +289,12 @@ async function initDatabase() {
 }
 
 async function getFullState(clientOrPool = pool) {
-  const [tournamentsRes, regRes, teamsRes, playersRes, matchesRes, eventsRes] = await Promise.all([
+  const [tournamentsRes, regRes, teamsRes, playersRes, staffRes, matchesRes, eventsRes] = await Promise.all([
     clientOrPool.query('SELECT * FROM tournaments ORDER BY id DESC'),
     clientOrPool.query("SELECT * FROM tournament_registrations WHERE status = 'approved' ORDER BY registered_at ASC"),
     clientOrPool.query('SELECT * FROM teams ORDER BY id ASC'),
     clientOrPool.query('SELECT * FROM players ORDER BY team_id ASC, sort_order ASC, id ASC'),
+    clientOrPool.query('SELECT * FROM club_staff ORDER BY team_id ASC, id ASC'),
     clientOrPool.query('SELECT * FROM matches ORDER BY id ASC'),
     clientOrPool.query('SELECT * FROM match_events ORDER BY id ASC')
   ]);
@@ -270,16 +327,45 @@ async function getFullState(clientOrPool = pool) {
       pitchMode: tm.pitch_mode || '5v5',
       formation: tm.formation || (tm.pitch_mode === '7v7' ? '2-3-1' : '1-2-1')
     })),
-    players: playersRes.rows.map((p) => ({
-      id: 'p-' + p.id,
-      teamId: 'team-' + p.team_id,
-      number: p.dorsal,
-      name: p.full_name,
-      pos: p.position,
-      status: p.status,
-      starter: p.is_starter,
-      customX: p.coord_x !== null ? Number(p.coord_x) : null,
-      customY: p.coord_y !== null ? Number(p.coord_y) : null
+    players: playersRes.rows.map((p) => {
+      const parts = (p.full_name || '').split(' ');
+      return {
+        id: 'p-' + p.id,
+        teamId: 'team-' + p.team_id,
+        number: p.dorsal,
+        name: p.full_name,
+        firstName: p.first_name || parts[0] || p.full_name,
+        lastName: p.last_name || parts.slice(1).join(' ') || '',
+        birthDate: p.birth_date || '2006-05-14',
+        idNumber: p.id_number || '',
+        schoolJoinDate: p.school_join_date || '2024-03-01',
+        repIdNumber: p.rep_id_number || '',
+        hasSpecialCondition: Boolean(p.has_special_condition),
+        specialConditionDetail: p.special_condition_detail || '',
+        birthCertDoc: p.birth_cert_doc || null,
+        playerIdDoc: p.player_id_doc || null,
+        repIdDoc: p.rep_id_doc || null,
+        specialConditionDoc: p.special_condition_doc || null,
+        pos: p.position,
+        status: p.status,
+        starter: p.is_starter,
+        customX: p.coord_x !== null ? Number(p.coord_x) : null,
+        customY: p.coord_y !== null ? Number(p.coord_y) : null
+      };
+    }),
+    staff: staffRes.rows.map((s) => ({
+      id: 'st-' + s.id,
+      teamId: 'team-' + s.team_id,
+      firstName: s.first_name,
+      lastName: s.last_name,
+      name: `${s.first_name} ${s.last_name}`.trim(),
+      roleTitle: s.role_title,
+      idNumber: s.id_number,
+      birthDate: s.birth_date || '',
+      phone: s.phone || '',
+      joinDate: s.join_date || '',
+      idDoc: s.id_doc || null,
+      licenseDoc: s.license_doc || null
     })),
     matches: matchesRes.rows.map((m) => ({
       id: 'm-' + m.id,
@@ -661,20 +747,129 @@ app.put('/api/players/:playerId/toggle-starter', authenticateToken, authorizeRol
 app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, res) => {
   try {
     const teamId = parseId(req.user.teamId);
-    const { name, number, pos } = req.body;
+    const {
+      firstName,
+      lastName,
+      name,
+      number,
+      pos,
+      birthDate,
+      idNumber,
+      schoolJoinDate,
+      repIdNumber,
+      hasSpecialCondition,
+      specialConditionDetail,
+      birthCertDoc,
+      playerIdDoc,
+      repIdDoc,
+      specialConditionDoc
+    } = req.body;
+
+    const dorsal = Number(number);
+    if (!dorsal || dorsal < 1 || dorsal > 99) {
+      return res.status(400).json({ error: 'El dorsal debe estar entre 1 y 99.' });
+    }
+
+    // Verificar que el dorsal no esté ocupado en el mismo club
+    const dupCheck = await pool.query(
+      'SELECT id, full_name FROM players WHERE team_id = $1 AND dorsal = $2',
+      [teamId, dorsal]
+    );
+    if (dupCheck.rows.length > 0) {
+      return res.status(409).json({
+        error: `El dorsal #${dorsal} ya está ocupado en tu club por ${dupCheck.rows[0].full_name}.`
+      });
+    }
+
+    const cleanFirst = (firstName || '').trim();
+    const cleanLast = (lastName || '').trim();
+    const fullName = (name || `${cleanFirst} ${cleanLast}`).trim();
+
+    if (!fullName || !birthDate || !schoolJoinDate || !birthCertDoc) {
+      return res.status(400).json({
+        error: 'Nombres, apellidos, fecha de nacimiento, fecha de ingreso a la escuela y partida de nacimiento son obligatorios.'
+      });
+    }
+
+    if (hasSpecialCondition && (!specialConditionDetail || !specialConditionDoc)) {
+      return res.status(400).json({
+        error: 'Debes especificar cuál es la condición especial y adjuntar el documento de soporte.'
+      });
+    }
+
     const maxOrderRes = await pool.query('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM players WHERE team_id = $1', [teamId]);
     const nextOrder = Number(maxOrderRes.rows[0].max_order) + 1;
 
     await pool.query(
-      `INSERT INTO players (team_id, full_name, dorsal, position, status, is_starter, coord_x, coord_y, sort_order)
-       VALUES ($1, $2, $3, $4, 'Disponible', FALSE, NULL, NULL, $5)`,
-      [teamId, name, Number(number) || 10, pos || 'MED', nextOrder]
+      `INSERT INTO players (
+        team_id, full_name, first_name, last_name, birth_date, id_number, school_join_date, rep_id_number,
+        has_special_condition, special_condition_detail, birth_cert_doc, player_id_doc, rep_id_doc, special_condition_doc,
+        dorsal, position, status, is_starter, coord_x, coord_y, sort_order
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'Disponible',FALSE,NULL,NULL,$17)`,
+      [
+        teamId,
+        fullName,
+        cleanFirst || fullName,
+        cleanLast,
+        birthDate,
+        idNumber || null,
+        schoolJoinDate,
+        repIdNumber || null,
+        Boolean(hasSpecialCondition),
+        hasSpecialCondition ? specialConditionDetail : null,
+        birthCertDoc,
+        playerIdDoc || null,
+        repIdDoc || null,
+        hasSpecialCondition ? specialConditionDoc : null,
+        dorsal,
+        pos || 'MED',
+        nextOrder
+      ]
     );
 
     const state = await broadcastState();
-    res.status(201).json({ message: 'Jugador fichado exitosamente.', state });
+    res.status(201).json({ message: 'Jugador fichado exitosamente con expediente completo.', state });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// 2.5 GESTIÓN DE CUERPO TÉCNICO DEL CLUB (CON DOCUMENTOS)
+// ==========================================
+app.post('/api/staff', authenticateToken, authorizeRoles('club'), async (req, res) => {
+  try {
+    const teamId = parseId(req.user.teamId);
+    const { firstName, lastName, roleTitle, idNumber, birthDate, phone, joinDate, idDoc, licenseDoc } = req.body;
+
+    if (!firstName || !lastName || !roleTitle || !idNumber || !idDoc || !licenseDoc) {
+      return res.status(400).json({
+        error: 'Nombres, apellidos, cargo, cédula y las imágenes de los documentos del cuerpo técnico son obligatorios.'
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO club_staff (team_id, first_name, last_name, role_title, id_number, birth_date, phone, join_date, id_doc, license_doc)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [teamId, firstName.trim(), lastName.trim(), roleTitle, idNumber.trim(), birthDate || null, phone || null, joinDate || null, idDoc, licenseDoc]
+    );
+
+    const state = await broadcastState();
+    res.status(201).json({ message: 'Integrante del cuerpo técnico registrado.', state });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/staff/:staffId', authenticateToken, authorizeRoles('club'), async (req, res) => {
+  try {
+    const teamId = parseId(req.user.teamId);
+    const staffId = parseId(req.params.staffId);
+    await pool.query('DELETE FROM club_staff WHERE id = $1 AND team_id = $2', [staffId, teamId]);
+    const state = await broadcastState();
+    res.json({ message: 'Integrante del cuerpo técnico eliminado.', state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

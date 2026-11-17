@@ -46,26 +46,55 @@ CREATE TABLE IF NOT EXISTS tournament_registrations (
     PRIMARY KEY (tournament_id, team_id)
 );
 
--- 5. Tabla de Jugadores (Plantilla + Pizarra Táctica 2D + Estadísticas)
+-- 5. Tabla de Jugadores (Plantilla + Expediente Documental + Pizarra Táctica 2D + Estadísticas)
 CREATE TABLE IF NOT EXISTS players (
     id SERIAL PRIMARY KEY,
     team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     full_name VARCHAR(120) NOT NULL,
+    first_name VARCHAR(80),
+    last_name VARCHAR(80),
+    birth_date VARCHAR(25),
+    id_number VARCHAR(30),
+    school_join_date VARCHAR(25),
+    rep_id_number VARCHAR(30),
+    has_special_condition BOOLEAN DEFAULT FALSE,
+    special_condition_detail TEXT,
+    birth_cert_doc TEXT,
+    player_id_doc TEXT,
+    rep_id_doc TEXT,
+    special_condition_doc TEXT,
     dorsal INTEGER NOT NULL CHECK (dorsal BETWEEN 1 AND 99),
     position VARCHAR(5) NOT NULL CHECK (position IN ('POR', 'DEF', 'MED', 'DEL')),
     status VARCHAR(20) DEFAULT 'Disponible' CHECK (status IN ('Disponible', 'Lesionado', 'Suspendido')),
     is_starter BOOLEAN DEFAULT FALSE,
-    coord_x NUMERIC(5,2) DEFAULT NULL, -- Coordenada X personalizada en la cancha 2D (0 a 100%)
-    coord_y NUMERIC(5,2) DEFAULT NULL, -- Coordenada Y personalizada en la cancha 2D (0 a 100%)
+    coord_x NUMERIC(5,2) DEFAULT NULL,
+    coord_y NUMERIC(5,2) DEFAULT NULL,
     goals INTEGER DEFAULT 0,
     assists INTEGER DEFAULT 0,
     yellow_cards INTEGER DEFAULT 0,
     red_cards INTEGER DEFAULT 0,
     mvp_awards INTEGER DEFAULT 0,
-    sort_order INTEGER DEFAULT 0
+    sort_order INTEGER DEFAULT 0,
+    UNIQUE (team_id, dorsal)
 );
 
--- 6. Tabla de Partidos (Calendario / Fixture)
+-- 6. Tabla de Cuerpo Técnico por Club (Con Documentos de Respaldo)
+CREATE TABLE IF NOT EXISTS club_staff (
+    id SERIAL PRIMARY KEY,
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    first_name VARCHAR(80) NOT NULL,
+    last_name VARCHAR(80) NOT NULL,
+    role_title VARCHAR(60) NOT NULL,
+    id_number VARCHAR(30) NOT NULL,
+    birth_date VARCHAR(25),
+    phone VARCHAR(30),
+    join_date VARCHAR(25),
+    id_doc TEXT NOT NULL,
+    license_doc TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7. Tabla de Partidos (Calendario / Fixture)
 CREATE TABLE IF NOT EXISTS matches (
     id SERIAL PRIMARY KEY,
     tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -82,7 +111,7 @@ CREATE TABLE IF NOT EXISTS matches (
     mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL
 );
 
--- 7. Eventos del Partido (Goles, Asistencias, Tarjetas, Cambios)
+-- 8. Eventos del Partido (Goles, Asistencias, Tarjetas, Cambios)
 CREATE TABLE IF NOT EXISTS match_events (
     id SERIAL PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -95,7 +124,7 @@ CREATE TABLE IF NOT EXISTS match_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 8. Bitácora de Auditoría de Seguridad
+-- 9. Bitácora de Auditoría de Seguridad
 CREATE TABLE IF NOT EXISTS audit_logs (
     id SERIAL PRIMARY KEY,
     actor_email VARCHAR(150) NOT NULL,
