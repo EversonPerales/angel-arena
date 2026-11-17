@@ -131,12 +131,13 @@
          MOTOR JAVASCRIPT CON SINCRONIZACIÓN POSTGRESQL + SOCKET.IO + FALLBACK LOCAL
     ========================================================================== -->
     <script>
-        var STORAGE_KEY = 'angel_arena_pro_safe_v7';
-        var SESSION_USER_KEY = 'angel_arena_user_v7';
-        var SESSION_TOKEN_KEY = 'angel_arena_jwt_v7';
+        var STORAGE_KEY = 'angel_arena_pro_safe_v8';
+        var SESSION_USER_KEY = 'angel_arena_user_v8';
+        var SESSION_TOKEN_KEY = 'angel_arena_jwt_v8';
         var memoryFallback = null;
         var authToken = null;
         var socket = null;
+        var selectedAuditClubId = 'team-1';
 
         // Estado de navegación
         var activeTourneyId = 'tour-1';
@@ -2348,7 +2349,8 @@
                             '</div>'
                         )) +
 
-                        '<div class="pt-2 flex justify-end">' +
+                        '<div class="pt-2 flex flex-wrap justify-between gap-2">' +
+                            '<button onclick="openRefereeMatchRosterModal(\'' + activeMatch.id + '\')" class="px-4 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-bold cursor-pointer">🪪 Verificar Nóminas, Carnets y Condiciones Médicas</button>' +
                             '<button onclick="openMatchReportModal(\'' + activeMatch.id + '\')" class="px-4 py-2 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">📄 Ver Cédula Completa del Partido</button>' +
                         '</div>' +
                     '</div>';
@@ -2497,8 +2499,66 @@
             notify('✅ Registrado: ' + type.toUpperCase() + ' de ' + (pl ? pl.name : 'Jugador'));
         }
 
+        function openRefereeMatchRosterModal(matchId) {
+            var m = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) m = db.matches[i];
+            }
+            if (!m) return;
+            var home = findTeam(m.homeId);
+            var away = findTeam(m.awayId);
+
+            function buildTeamCheckRows(teamId) {
+                var htmlRows = '';
+                for (var j = 0; j < db.players.length; j++) {
+                    var p = db.players[j];
+                    if (p.teamId !== teamId) continue;
+                    var docBadge = (p.docStatus === 'rejected')
+                        ? '<span class="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-bold">⚠️ Doc. Observado</span>'
+                        : '<span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">✅ Habilitado</span>';
+
+                    htmlRows += '<div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2 text-xs">' +
+                        '<div>' +
+                            '<span class="font-mono font-black text-emerald-400 mr-1.5">#' + p.number + '</span>' +
+                            '<strong class="text-white">' + p.name + '</strong> <span class="text-[10px] text-slate-400">(' + p.pos + ' • ' + calculateAge(p.birthDate || '2006-05-14') + ')</span>' +
+                            (p.hasSpecialCondition ? '<div class="text-[10px] text-amber-300 font-bold mt-0.5">⚕️ Condición Especial: ' + (p.specialConditionDetail || 'Registrada') + '</div>' : '') +
+                        '</div>' +
+                        '<div class="flex items-center gap-1.5 shrink-0">' +
+                            docBadge +
+                            '<button onclick="openPlayerDossierModal(\'' + p.id + '\')" class="px-2 py-1 rounded bg-slate-800 text-cyan-300 text-[10px] font-bold border-0 cursor-pointer">📄 Docs</button>' +
+                        '</div>' +
+                    '</div>';
+                }
+                return htmlRows;
+            }
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-amber-400 font-bold">Control Arbitral de Mesa • Revisión de Carnets</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">' + home.name + ' vs ' + away.name + '</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-3 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+                        '<div class="space-y-2">' +
+                            '<div class="text-xs font-black uppercase text-emerald-400">' + home.name + '</div>' +
+                            buildTeamCheckRows(home.id) +
+                        '</div>' +
+                        '<div class="space-y-2">' +
+                            '<div class="text-xs font-black uppercase text-cyan-400">' + away.name + '</div>' +
+                            buildTeamCheckRows(away.id) +
+                        '</div>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
         // =========================================================================
-        // INTERFAZ 3: ORGANIZADOR GENERAL (CREAR TORNEO 5v5 / 7v7, GENERAR FIXTURE Y TABLAS)
+        // INTERFAZ 3: ORGANIZADOR GENERAL (TORNEOS + AUDITORÍA DOCUMENTAL DE CLUBES + FIXTURE + TABLAS)
         // =========================================================================
 
         function renderOrganizerDashboard() {
@@ -2512,8 +2572,11 @@
                 }
 
                 tCards += '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
-                    '<div class="flex items-center justify-between">' +
-                        '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">Modalidad ' + t.pitchSize + '</span>' +
+                    '<div class="flex flex-wrap items-center justify-between gap-2">' +
+                        '<div class="flex items-center gap-2">' +
+                            '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">Modalidad ' + t.pitchSize + '</span>' +
+                            '<span class="px-2.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono text-xs font-bold">' + (t.category || 'Categoría Libre') + '</span>' +
+                        '</div>' +
                         '<span class="text-xs font-mono text-emerald-400 font-bold">Inscritos: ' + t.teamIds.length + '/' + t.maxTeams + '</span>' +
                     '</div>' +
                     '<h3 class="text-lg font-black text-white m-0">' + t.name + '</h3>' +
@@ -2530,7 +2593,7 @@
                 bodyHtml = '' +
                     '<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">' +
                         '<div class="lg:col-span-5 glass-panel p-5 border border-purple-500/30 space-y-3.5 h-fit">' +
-                            '<h2 class="text-base font-black text-white m-0">➕ Crear Nuevo Torneo (Visible a todos los Clubes)</h2>' +
+                            '<h2 class="text-base font-black text-white m-0">➕ Crear Nuevo Torneo Oficial</h2>' +
                             '<form onsubmit="handleAdminCreateTourney(event)" class="space-y-3">' +
                                 '<div>' +
                                     '<label class="block text-xs font-bold text-slate-300 mb-1">Nombre del Torneo</label>' +
@@ -2538,22 +2601,35 @@
                                 '</div>' +
                                 '<div class="grid grid-cols-2 gap-2.5">' +
                                     '<div>' +
-                                        '<label class="block text-xs font-bold text-slate-300 mb-1">Jugadores en Cancha</label>' +
+                                        '<label class="block text-xs font-bold text-slate-300 mb-1">Modalidad de Cancha</label>' +
                                         '<select id="adm-t-size" class="fallback-input">' +
                                             '<option value="5v5">⚽ Fútbol 5 / Sala (5v5)</option>' +
                                             '<option value="7v7">🏟️ Fútbol 7 (7v7)</option>' +
                                         '</select>' +
                                     '</div>' +
                                     '<div>' +
+                                        '<label class="block text-xs font-bold text-slate-300 mb-1">Categoría por Edad</label>' +
+                                        '<select id="adm-t-cat" class="fallback-input">' +
+                                            '<option value="Categoría Libre">Categoría Libre / Adultos</option>' +
+                                            '<option value="Sub-20">Sub-20 (Juvenil)</option>' +
+                                            '<option value="Sub-17">Sub-17 (Cadete)</option>' +
+                                            '<option value="Sub-15">Sub-15 (Infantil A)</option>' +
+                                            '<option value="Sub-13">Sub-13 (Infantil B)</option>' +
+                                            '<option value="Sub-11">Sub-11 (Pre-Infantil)</option>' +
+                                            '<option value="Femenino Libre">Femenino Libre</option>' +
+                                        '</select>' +
+                                    '</div>' +
+                                '</div>' +
+                                '<div class="grid grid-cols-3 gap-2.5">' +
+                                    '<div>' +
                                         '<label class="block text-xs font-bold text-slate-300 mb-1">Cupo Máximo</label>' +
                                         '<select id="adm-t-max" class="fallback-input">' +
                                             '<option value="4">4 Equipos</option>' +
                                             '<option value="8" selected>8 Equipos</option>' +
                                             '<option value="12">12 Equipos</option>' +
+                                            '<option value="16">16 Equipos</option>' +
                                         '</select>' +
                                     '</div>' +
-                                '</div>' +
-                                '<div class="grid grid-cols-2 gap-2.5">' +
                                     '<div>' +
                                         '<label class="block text-xs font-bold text-slate-300 mb-1">Fecha Inicio</label>' +
                                         '<input type="text" id="adm-t-date" required value="15 Ene 2027" class="fallback-input">' +
@@ -2568,6 +2644,8 @@
                         '</div>' +
                         '<div class="lg:col-span-7 space-y-4">' + tCards + '</div>' +
                     '</div>';
+            } else if (adminSection === 'audit') {
+                bodyHtml = renderAdminClubAuditSection();
             } else if (adminSection === 'calendar') {
                 bodyHtml = renderTournamentBarHtml() + renderMatchesGridHtml(activeTourneyId);
             } else {
@@ -2583,6 +2661,7 @@
                         '</div>' +
                         '<div class="flex flex-wrap gap-2">' +
                             '<button onclick="adminSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'tournaments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Crear & Gestionar Torneos</button>' +
+                            '<button onclick="adminSection=\'audit\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'audit' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🛡️ Auditoría de Clubes & Docs (' + db.teams.length + ')</button>' +
                             '<button onclick="adminSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'calendar' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Calendario</button>' +
                             '<button onclick="adminSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'standings' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Tabla General</button>' +
                             '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
@@ -2592,10 +2671,107 @@
                 '</div>';
         }
 
+        function renderAdminClubAuditSection() {
+            var clubButtons = '';
+            for (var i = 0; i < db.teams.length; i++) {
+                var tm = db.teams[i];
+                var isSel = (tm.id === selectedAuditClubId);
+                clubButtons += '<button onclick="selectedAuditClubId=\'' + tm.id + '\'; renderViewport();" class="px-3.5 py-2 rounded-xl text-xs font-bold cursor-pointer border ' +
+                    (isSel ? 'bg-purple-500 text-slate-950 border-purple-400 font-black' : 'bg-slate-900 text-slate-300 border-slate-800') + '">' +
+                    tm.name + ' (' + tm.shortName + ')' +
+                '</button>';
+            }
+
+            var club = findTeam(selectedAuditClubId);
+            var playerRows = '';
+            for (var pIdx = 0; pIdx < db.players.length; pIdx++) {
+                var p = db.players[pIdx];
+                if (p.teamId !== club.id) continue;
+                var isRejected = (p.docStatus === 'rejected');
+                playerRows += '<tr class="border-b border-slate-800/70">' +
+                    '<td class="py-2.5 pl-2 font-mono font-black text-emerald-400">#' + p.number + '</td>' +
+                    '<td class="py-2.5 font-bold text-white">' + p.name + ' <span class="text-[10px] font-mono text-cyan-400">(' + p.pos + ')</span></td>' +
+                    '<td class="py-2.5 text-xs text-slate-300">' + (p.birthDate || '2006-05-14') + ' (' + calculateAge(p.birthDate || '2006-05-14') + ')</td>' +
+                    '<td class="py-2.5 text-xs text-slate-300">' + (p.idNumber || 'Menor / Sin C.I') + '</td>' +
+                    '<td class="py-2.5 text-xs">' +
+                        (p.hasSpecialCondition
+                            ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">⚕️ ' + (p.specialConditionDetail || 'Sí') + '</span>'
+                            : '<span class="text-slate-500 text-[11px]">Ninguna</span>') +
+                    '</td>' +
+                    '<td class="py-2.5 text-xs">' +
+                        (isRejected
+                            ? '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold text-[10px]">⚠️ Observado</span>'
+                            : '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[10px]">✅ Validado</span>') +
+                    '</td>' +
+                    '<td class="py-2.5 text-right pr-2 space-x-1">' +
+                        '<button onclick="openPlayerDossierModal(\'' + p.id + '\')" class="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold cursor-pointer">📄 Revisar Docs</button>' +
+                        '<button onclick="toggleAdminPlayerDocStatus(\'' + p.id + '\')" class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-[11px] font-bold cursor-pointer">' +
+                            (isRejected ? '✅ Aprobar' : '⚠️ Observar') +
+                        '</button>' +
+                    '</td>' +
+                '</tr>';
+            }
+
+            var staffRows = '';
+            if (db.staff) {
+                for (var sIdx = 0; sIdx < db.staff.length; sIdx++) {
+                    var st = db.staff[sIdx];
+                    if (st.teamId !== club.id) continue;
+                    staffRows += '<div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">' +
+                        '<div>' +
+                            '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[10px] mr-2">' + st.roleTitle + '</span>' +
+                            '<strong class="text-white">' + (st.name || (st.firstName + ' ' + st.lastName)) + '</strong>' +
+                            '<span class="text-slate-400 ml-2">C.I: ' + st.idNumber + ' • Tel: ' + (st.phone || '—') + '</span>' +
+                        '</div>' +
+                        '<button onclick="openStaffDossierModal(\'' + st.id + '\')" class="px-3 py-1.5 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">📄 Ver Cédula y Credencial</button>' +
+                    '</div>';
+                }
+            }
+
+            return '<div class="space-y-5">' +
+                '<div class="glass-panel p-4 border border-purple-500/30 flex flex-wrap items-center justify-between gap-3">' +
+                    '<span class="text-xs font-extrabold uppercase text-purple-300">🛡️ Selecciona un Club para Auditar sus Expedientes:</span>' +
+                    '<div class="flex flex-wrap gap-2">' + clubButtons + '</div>' +
+                '</div>' +
+                '<div class="glass-panel p-5 border border-slate-800 space-y-3 overflow-x-auto">' +
+                    '<h3 class="text-base font-black text-white m-0">👥 Auditoría de Jugadores — ' + club.name + '</h3>' +
+                    '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
+                        '<thead>' +
+                            '<tr class="border-b border-slate-800 text-[11px] uppercase text-slate-400">' +
+                                '<th class="py-2 pl-2">#</th>' +
+                                '<th class="py-2">Jugador</th>' +
+                                '<th class="py-2">Nacimiento / Edad</th>' +
+                                '<th class="py-2">Cédula</th>' +
+                                '<th class="py-2">Cond. Especial</th>' +
+                                '<th class="py-2">Estado Doc.</th>' +
+                                '<th class="py-2 text-right pr-2">Auditoría</th>' +
+                            '</tr>' +
+                        '</thead>' +
+                        '<tbody>' + playerRows + '</tbody>' +
+                    '</table>' +
+                '</div>' +
+                '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
+                    '<h3 class="text-base font-black text-white m-0">👔 Cuerpo Técnico Acreditado — ' + club.name + '</h3>' +
+                    '<div class="space-y-2">' + (staffRows || '<div class="text-xs text-slate-400">Sin cuerpo técnico registrado en este club.</div>') + '</div>' +
+                '</div>' +
+            '</div>';
+        }
+
+        function toggleAdminPlayerDocStatus(playerId) {
+            var p = findPlayer(playerId);
+            if (!p) return;
+            p.docStatus = (p.docStatus === 'rejected') ? 'approved' : 'rejected';
+            saveDB();
+            renderViewport();
+            notify(p.docStatus === 'rejected' ? ('⚠️ Expediente de ' + p.name + ' marcado con observación') : ('✅ Expediente de ' + p.name + ' aprobado oficialmente'));
+        }
+
         function handleAdminCreateTourney(e) {
             e.preventDefault();
             var name = document.getElementById('adm-t-name').value.trim();
             var size = document.getElementById('adm-t-size').value;
+            var catEl = document.getElementById('adm-t-cat');
+            var category = catEl ? catEl.value : 'Categoría Libre';
             var max = parseInt(document.getElementById('adm-t-max').value, 10) || 8;
             var date = document.getElementById('adm-t-date').value.trim();
             var prize = document.getElementById('adm-t-prize').value.trim();
@@ -2605,7 +2781,8 @@
                 id: newId,
                 name: name,
                 pitchSize: size,
-                format: 'Liga + Playoffs',
+                category: category,
+                format: 'Liga + Playoffs (' + category + ')',
                 maxTeams: max,
                 startDate: date,
                 prize: prize,
@@ -2618,6 +2795,7 @@
             apiRequest('POST', '/api/tournaments', {
                 name: name,
                 pitchSize: size,
+                category: category,
                 maxTeams: max,
                 startDate: date,
                 prize: prize
@@ -2627,7 +2805,7 @@
                     renderViewport();
                 }
             });
-            notify('🚀 Torneo "' + name + '" publicado para todos los clubes');
+            notify('🚀 Torneo "' + name + '" (' + category + ') publicado para todos los clubes');
         }
 
         function generateTourneyFixture(tourneyId) {
