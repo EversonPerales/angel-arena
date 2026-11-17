@@ -11,21 +11,33 @@ const { Pool } = require('pg');
 const { Server } = require('socket.io');
 
 const app = express();
+// Necesario detrás de Cloudflare y el proxy inverso (Traefik/Caddy) de Coolify o Dokploy
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: { origin: '*' },
+  transports: ['websocket', 'polling']
+});
 
-// Conexión a PostgreSQL (Railway inyecta DATABASE_URL automáticamente)
-const isLocalDb =
-  !process.env.DATABASE_URL ||
-  process.env.DATABASE_URL.includes('localhost') ||
-  process.env.DATABASE_URL.includes('127.0.0.1');
+// Conexión a PostgreSQL compatible con Coolify, Dokploy, Docker Compose y Railway
+function createDbPool(forceSsl) {
+  if (!process.env.DATABASE_URL) return null;
+  const url = process.env.DATABASE_URL;
+  const useSsl =
+    typeof forceSsl === 'boolean'
+      ? forceSsl
+      : process.env.DB_SSL === 'true' ||
+        url.includes('sslmode=require') ||
+        Boolean(process.env.RAILWAY_ENVIRONMENT);
 
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: isLocalDb ? false : { rejectUnauthorized: false }
-    })
-  : null;
+  return new Pool({
+    connectionString: url,
+    ssl: useSsl ? { rejectUnauthorized: false } : false
+  });
+}
+
+let pool = createDbPool();
 
 let dbReady = false;
 const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_cambiar_en_railway';
@@ -170,35 +182,54 @@ async function initDatabase() {
     console.log('ℹ️ Sin DATABASE_URL configurada: operando en modo autónomo.');
     return;
   }
-  const client = await pool.connect();
-  try {
-    const schemaPath = path.join(__dirname, 'db', 'schema.sql');
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    await client.query(schemaSql);
 
-    // Migraciones seguras por si las tablas ya existían de una versión previa
-    await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS short_name VARCHAR(10) NOT NULL DEFAULT 'CLB'`);
-    await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE players ALTER COLUMN coord_x DROP DEFAULT`);
-    await client.query(`ALTER TABLE players ALTER COLUMN coord_y DROP DEFAULT`);
-    await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    let client;
+    try {
+      client = await pool.connect();
+      const schemaPath = path.join(__dirname, 'db', 'schema.sql');
+      const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+      await client.query(schemaSql);
 
-    const countRes = await client.query('SELECT COUNT(*) FROM users');
-    if (parseInt(countRes.rows[0].count, 10) === 0) {
-      await client.query('BEGIN');
-      await seedDemoData(client);
-      await client.query('COMMIT');
-      console.log('✅ Base de datos PostgreSQL inicializada con datos demo de Ángel Arena.');
-    } else {
-      console.log('✅ Base de datos PostgreSQL conectada y lista.');
+      // Migraciones seguras por si las tablas ya existían de una versión previa
+      await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS short_name VARCHAR(10) NOT NULL DEFAULT 'CLB'`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0`);
+      await client.query(`ALTER TABLE players ALTER COLUMN coord_x DROP DEFAULT`);
+      await client.query(`ALTER TABLE players ALTER COLUMN coord_y DROP DEFAULT`);
+      await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
+
+      const countRes = await client.query('SELECT COUNT(*) FROM users');
+      if (parseInt(countRes.rows[0].count, 10) === 0) {
+        await client.query('BEGIN');
+        await seedDemoData(client);
+        await client.query('COMMIT');
+        console.log('✅ Base de datos PostgreSQL inicializada con datos demo de Ángel Arena.');
+      } else {
+        console.log('✅ Base de datos PostgreSQL conectada y lista.');
+      }
+      dbReady = true;
+      return;
+    } catch (err) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+      }
+      const msg = String(err.message || '');
+      // Si el contenedor de Postgres en Coolify/Dokploy no usa SSL (o viceversa), ajusta automáticamente
+      if (msg.includes('does not support SSL')) {
+        pool = createDbPool(false);
+        continue;
+      }
+      if (msg.includes('SSL/TLS required') || msg.includes('no pg_hba.conf entry')) {
+        pool = createDbPool(true);
+        continue;
+      }
+      console.warn(`⏳ Intento ${attempt}/6 conectando a PostgreSQL: ${msg}`);
+      await new Promise((r) => setTimeout(r, 2500));
+    } finally {
+      if (client) client.release();
     }
-    dbReady = true;
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('⚠️ Error inicializando PostgreSQL:', err.message);
-  } finally {
-    client.release();
   }
+  console.error('⚠️ No se pudo inicializar PostgreSQL tras varios intentos.');
 }
 
 async function getFullState(clientOrPool = pool) {
