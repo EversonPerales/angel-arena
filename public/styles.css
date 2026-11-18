@@ -113,3 +113,104 @@ body {
     outline: none;
     border-color: #10B981;
 }
+
+/* ==========================================
+   PANTALLA DE CARGA Y TRANSICIÓN DE RUTAS OFICIAL
+   ========================================== */
+#route-loader-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    background: radial-gradient(circle at center, rgba(15, 23, 42, 0.96) 0%, rgba(2, 6, 23, 0.99) 100%);
+    backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+}
+
+#route-loader-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.loader-logo-wrapper {
+    position: relative;
+    width: 118px;
+    height: 118px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.loader-spin-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    border: 3.5px solid rgba(16, 185, 129, 0.15);
+    border-top-color: #10B981;
+    border-right-color: #06B6D4;
+    animation: spinLoaderRing 0.85s linear infinite;
+    box-shadow: 0 0 28px rgba(16, 185, 129, 0.35);
+}
+
+.loader-logo-img {
+    width: 88px;
+    height: 88px;
+    border-radius: 999px;
+    object-fit: contain;
+    background: #FFFFFF;
+    padding: 5px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
+    animation: pulseLogoScale 1.2s ease-in-out infinite;
+}
+
+.loader-bar-track {
+    width: 220px;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(30, 41, 59, 0.9);
+    overflow: hidden;
+    margin-top: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.loader-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #10B981, #06B6D4, #F59E0B);
+    border-radius: 999px;
+    transition: width 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+#route-loader-overlay.active .loader-bar-fill {
+    width: 100%;
+}
+
+@keyframes spinLoaderRing {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+@keyframes pulseLogoScale {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+@keyframes viewFadeSlideIn {
+    0% {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.view-transition-enter {
+    animation: viewFadeSlideIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}

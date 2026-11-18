@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS teams (
     coach_name VARCHAR(120) NOT NULL,
     owner_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
     primary_color VARCHAR(15) DEFAULT '#10b981',
-    pitch_mode VARCHAR(5) DEFAULT '5v5' CHECK (pitch_mode IN ('5v5', '7v7')),
+    logo_url TEXT,
+    pitch_mode VARCHAR(10) DEFAULT '5v5' CHECK (pitch_mode IN ('5v5', '7v7', '11v11')),
     formation VARCHAR(15) DEFAULT '1-2-1',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS tournaments (
     id SERIAL PRIMARY KEY,
     name VARCHAR(150) NOT NULL,
     format VARCHAR(50) NOT NULL DEFAULT 'Liga Regular',
-    pitch_size VARCHAR(5) NOT NULL DEFAULT '5v5' CHECK (pitch_size IN ('5v5', '7v7')),
+    pitch_size VARCHAR(10) NOT NULL DEFAULT '5v5' CHECK (pitch_size IN ('5v5', '7v7', '11v11')),
     max_teams INTEGER NOT NULL DEFAULT 8,
     start_date VARCHAR(40) NOT NULL,
     prize VARCHAR(120),
@@ -59,10 +60,12 @@ CREATE TABLE IF NOT EXISTS players (
     rep_id_number VARCHAR(30),
     has_special_condition BOOLEAN DEFAULT FALSE,
     special_condition_detail TEXT,
+    photo_url TEXT,
     birth_cert_doc TEXT,
     player_id_doc TEXT,
     rep_id_doc TEXT,
     special_condition_doc TEXT,
+    doc_status VARCHAR(20) DEFAULT 'approved',
     dorsal INTEGER NOT NULL CHECK (dorsal BETWEEN 1 AND 99),
     position VARCHAR(5) NOT NULL CHECK (position IN ('POR', 'DEF', 'MED', 'DEL')),
     status VARCHAR(20) DEFAULT 'Disponible' CHECK (status IN ('Disponible', 'Lesionado', 'Suspendido')),
@@ -124,7 +127,22 @@ CREATE TABLE IF NOT EXISTS match_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 9. Bitácora de Auditoría de Seguridad
+-- 9. Tabla de Pagos y Solvencia de Clubes (Inscripción y Arbitraje)
+CREATE TABLE IF NOT EXISTS club_payments (
+    id SERIAL PRIMARY KEY,
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    tournament_id INTEGER REFERENCES tournaments(id) ON DELETE SET NULL,
+    concept VARCHAR(120) NOT NULL,
+    amount VARCHAR(40) NOT NULL,
+    method VARCHAR(40) NOT NULL,
+    reference VARCHAR(60) NOT NULL,
+    payment_date VARCHAR(30) NOT NULL,
+    receipt_doc TEXT,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 10. Bitácora de Auditoría de Seguridad
 CREATE TABLE IF NOT EXISTS audit_logs (
     id SERIAL PRIMARY KEY,
     actor_email VARCHAR(150) NOT NULL,
