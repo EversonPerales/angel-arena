@@ -41,6 +41,11 @@ let pool = createDbPool();
 
 let dbReady = false;
 const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_cambiar_en_railway';
+let currentAppVersion = process.env.APP_VERSION || '1.3.0';
+let currentReleaseNotes =
+  process.env.APP_RELEASE_NOTES ||
+  'Módulo Guante de Oro para porteros, carnets con QR real escaneable y pantalla de carga oficial.';
+let currentTargetRole = 'all'; // 'all' | 'referee' | 'club' | 'admin'
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -328,10 +333,47 @@ function authorizeRoles(...allowedRoles) {
 }
 
 // ==========================================
-// 0. ESTADO GLOBAL Y SALUD DEL SERVIDOR
+// 0. ESTADO GLOBAL, VERSIÓN Y SALUD DEL SERVIDOR
 // ==========================================
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, dbReady });
+  res.json({
+    ok: true,
+    dbReady,
+    version: currentAppVersion,
+    notes: currentReleaseNotes,
+    targetRole: currentTargetRole
+  });
+});
+
+app.get('/api/version', (req, res) => {
+  res.json({
+    version: currentAppVersion,
+    notes: currentReleaseNotes,
+    targetRole: currentTargetRole
+  });
+});
+
+app.post('/api/admin/broadcast-update', authenticateToken, authorizeRoles('admin'), (req, res) => {
+  const { version, notes, targetRole } = req.body;
+  currentAppVersion = (version && String(version).trim()) || '1.3.' + Math.floor(Date.now() / 1000);
+  currentReleaseNotes =
+    (notes && String(notes).trim()) ||
+    'Nueva actualización oficial disponible en Liga F7 Caracas.';
+  currentTargetRole = targetRole || 'all';
+
+  io.emit('app_update_available', {
+    version: currentAppVersion,
+    notes: currentReleaseNotes,
+    targetRole: currentTargetRole,
+    forcedByAdmin: true
+  });
+
+  res.json({
+    message: 'Aviso de actualización enviado en tiempo real a los usuarios conectados.',
+    version: currentAppVersion,
+    notes: currentReleaseNotes,
+    targetRole: currentTargetRole
+  });
 });
 
 app.get('/api/state', async (req, res) => {
@@ -349,10 +391,15 @@ app.post('/api/system/reset', authenticateToken, authorizeRoles('admin'), async 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`
+      TRUNCATE TABLE match_events, matches, club_payments, club_staff, players, tournament_registrations, tournaments, teams
+      RESTART IDENTITY CASCADE
+    `);
+    await client.query("DELETE FROM users WHERE role = 'club'");
     await ensureOfficialAccounts(client);
     await client.query('COMMIT');
     const state = await broadcastState();
-    res.json({ message: 'Cuentas oficiales verificadas en PostgreSQL.', state });
+    res.json({ message: 'Todos los datos de prueba fueron eliminados. Sistema limpio en 0.', state });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
@@ -1304,8 +1351,14 @@ app.post('/api/matches/:matchId/events', authenticateToken, authorizeRoles('refe
   }
 });
 
-// WebSockets para sincronizar el cronómetro en vivo
+// WebSockets para sincronizar el cronómetro en vivo y notificar nuevas versiones
 io.on('connection', (socket) => {
+  socket.emit('app_version_info', {
+    version: currentAppVersion,
+    notes: currentReleaseNotes,
+    targetRole: currentTargetRole
+  });
+
   socket.on('referee_clock_tick', (data) => {
     socket.broadcast.emit('live_clock_sync', data);
   });
