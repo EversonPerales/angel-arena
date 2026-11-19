@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS tournaments (
     max_teams INTEGER NOT NULL DEFAULT 8,
     start_date VARCHAR(40) NOT NULL,
     prize VARCHAR(120),
+    registration_fee VARCHAR(50) DEFAULT '$150 USD',
+    referee_fee VARCHAR(50) DEFAULT '$20 USD',
     status VARCHAR(25) DEFAULT 'open' CHECK (status IN ('open', 'active', 'finished')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -33,26 +33,6 @@
         </div>
     </div>
 
-    <!-- Banner Oficial de Nueva Actualización Disponible en Vivo -->
-    <div id="update-banner-box" style="display:none; position:fixed; top:16px; right:16px; left:16px; max-width:560px; margin:auto; z-index:9800;" class="glass-panel p-4 border-2 border-emerald-400 shadow-2xl">
-        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div class="flex items-center gap-3">
-                <img src="logo-liga-f7-caracas.jpg" alt="Liga F7 Caracas" style="width:44px; height:44px; border-radius:12px; object-fit:contain; background:#FFFFFF; padding:2px; border:1.5px solid #10B981;" class="shrink-0">
-                <div>
-                    <div class="flex items-center gap-2">
-                        <span class="px-2 py-0.5 rounded-full bg-emerald-500 text-slate-950 font-mono text-[10px] font-black uppercase">🚀 NUEVA VERSIÓN <span id="update-banner-version">v1.3.0</span></span>
-                    </div>
-                    <h4 class="text-xs sm:text-sm font-black text-white m-0 mt-1">Actualización Oficial de Liga F7 Caracas Disponible</h4>
-                    <p id="update-banner-notes" class="text-[11px] text-slate-300 m-0 mt-0.5">Se han aplicado mejoras en tu panel. Actualiza para cargar los nuevos cambios sin perder tus datos.</p>
-                </div>
-            </div>
-            <div class="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
-                <button type="button" onclick="dismissLiveAppUpdate()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold border-0 cursor-pointer">Más tarde</button>
-                <button type="button" onclick="applyLiveAppUpdate()" class="btn-primary-gradient px-4 py-2 text-xs font-black shadow-lg">🔄 Actualizar Ahora</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Notificación Toast Flotante -->
     <div id="toast-box" style="display:none; position:fixed; bottom:18px; right:18px; left:18px; max-width:400px; margin:auto; z-index:9999;" class="glass-panel px-4 py-3 border border-emerald-500/50 flex items-center gap-3 shadow-2xl">
         <span class="w-3 h-3 rounded-full bg-emerald-400 shrink-0"></span>
@@ -312,27 +292,32 @@
 
         function loadDB() {
             var state = null;
+            var savedUserObj = null;
             try {
                 if (window.localStorage) {
-                    var raw = window.localStorage.getItem(STORAGE_KEY);
-                    if (raw) state = JSON.parse(raw);
                     var savedToken = window.localStorage.getItem(SESSION_TOKEN_KEY);
                     if (savedToken) authToken = savedToken;
                     var savedUser = window.localStorage.getItem(SESSION_USER_KEY);
-                    if (savedUser && state) state.currentUser = JSON.parse(savedUser);
+                    if (savedUser) savedUserObj = JSON.parse(savedUser);
+                    var raw = window.localStorage.getItem(STORAGE_KEY);
+                    if (raw) state = JSON.parse(raw);
                 }
             } catch (e) {}
-            if (state) return state;
-            if (memoryFallback) return memoryFallback;
-            memoryFallback = createInitialData();
-            return memoryFallback;
+            if (!state) {
+                state = memoryFallback || createInitialData();
+            }
+            if (savedUserObj) {
+                state.currentUser = savedUserObj;
+            }
+            memoryFallback = state;
+            return state;
         }
 
         function saveDB() {
             memoryFallback = db;
+            // 1. Guardar SIEMPRE primero la sesión y el token JWT (nunca falla por cuota en móviles)
             try {
                 if (window.localStorage) {
-                    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
                     if (db.currentUser) {
                         window.localStorage.setItem(SESSION_USER_KEY, JSON.stringify(db.currentUser));
                     } else {
@@ -342,6 +327,69 @@
                         window.localStorage.setItem(SESSION_TOKEN_KEY, authToken);
                     } else {
                         window.localStorage.removeItem(SESSION_TOKEN_KEY);
+                    }
+                }
+            } catch (e) {}
+
+            // 2. Guardar caché ligera del estado sin documentos pesados en Base64 para no saturar los 5MB del móvil
+            try {
+                if (window.localStorage) {
+                    if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+                        var lightPlayers = [];
+                        for (var i = 0; i < db.players.length; i++) {
+                            var p = db.players[i];
+                            lightPlayers.push({
+                                id: p.id, teamId: p.teamId, number: p.number, name: p.name,
+                                firstName: p.firstName, lastName: p.lastName, birthDate: p.birthDate,
+                                idNumber: p.idNumber, schoolJoinDate: p.schoolJoinDate, repIdNumber: p.repIdNumber,
+                                hasSpecialCondition: p.hasSpecialCondition, specialConditionDetail: p.specialConditionDetail,
+                                photoUrl: p.photoUrl, hasBirthCert: Boolean(p.hasBirthCert || p.birthCertDoc),
+                                hasPlayerIdDoc: Boolean(p.hasPlayerIdDoc || p.playerIdDoc),
+                                hasRepIdDoc: Boolean(p.hasRepIdDoc || p.repIdDoc),
+                                hasSpecialDoc: Boolean(p.hasSpecialDoc || p.specialConditionDoc),
+                                docStatus: p.docStatus, pos: p.pos, status: p.status, starter: p.starter,
+                                customX: p.customX, customY: p.customY
+                            });
+                        }
+                        var lightStaff = [];
+                        if (db.staff) {
+                            for (var s = 0; s < db.staff.length; s++) {
+                                var st = db.staff[s];
+                                lightStaff.push({
+                                    id: st.id, teamId: st.teamId, firstName: st.firstName, lastName: st.lastName,
+                                    name: st.name, roleTitle: st.roleTitle, idNumber: st.idNumber,
+                                    birthDate: st.birthDate, phone: st.phone, joinDate: st.joinDate,
+                                    hasIdDoc: Boolean(st.hasIdDoc || st.idDoc),
+                                    hasLicenseDoc: Boolean(st.hasLicenseDoc || st.licenseDoc)
+                                });
+                            }
+                        }
+                        var lightPayments = [];
+                        if (db.payments) {
+                            for (var pyIdx = 0; pyIdx < db.payments.length; pyIdx++) {
+                                var py = db.payments[pyIdx];
+                                lightPayments.push({
+                                    id: py.id, teamId: py.teamId, tournamentId: py.tournamentId,
+                                    concept: py.concept, amount: py.amount, method: py.method,
+                                    reference: py.reference, date: py.date, status: py.status,
+                                    hasReceiptDoc: Boolean(py.hasReceiptDoc || py.receiptDoc)
+                                });
+                            }
+                        }
+                        var lightDb = {
+                            currentUser: db.currentUser,
+                            referees: db.referees || [],
+                            tournaments: db.tournaments || [],
+                            teams: db.teams || [],
+                            players: lightPlayers,
+                            staff: lightStaff,
+                            payments: lightPayments,
+                            matches: db.matches || [],
+                            events: db.events || []
+                        };
+                        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(lightDb));
+                    } else {
+                        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
                     }
                 }
             } catch (e) {}
@@ -355,14 +403,14 @@
         function applyServerState(remoteState) {
             if (!remoteState || !remoteState.teams) return;
             if (remoteState.referees) db.referees = remoteState.referees;
-            db.tournaments = remoteState.tournaments || db.tournaments;
-            db.teams = remoteState.teams || db.teams;
-            db.players = remoteState.players || db.players;
-            if (remoteState.staff) db.staff = remoteState.staff;
-            if (remoteState.payments) db.payments = remoteState.payments;
-            db.matches = remoteState.matches || db.matches;
-            db.events = remoteState.events || db.events;
-            if (db.tournaments.length > 0 && !findTournament(activeTourneyId)) {
+            db.tournaments = remoteState.tournaments || [];
+            db.teams = remoteState.teams || [];
+            db.players = remoteState.players || [];
+            db.staff = remoteState.staff || [];
+            db.payments = remoteState.payments || [];
+            db.matches = remoteState.matches || [];
+            db.events = remoteState.events || [];
+            if (db.tournaments.length > 0 && (!activeTourneyId || !findTournament(activeTourneyId))) {
                 activeTourneyId = db.tournaments[0].id;
             }
             saveDB();
@@ -379,7 +427,21 @@
                 body: body ? JSON.stringify(body) : undefined
             })
             .then(function(res) {
-                if (!res.ok) return null;
+                if (res.status === 401 || res.status === 403) {
+                    return res.json().then(function(errData) {
+                        notify('⚠️ ' + ((errData && errData.error) || 'Sesión expirada. Inicia sesión nuevamente.'));
+                        if (res.status === 401) {
+                            logoutSession();
+                        }
+                        return null;
+                    });
+                }
+                if (!res.ok) {
+                    return res.json().then(function(errData) {
+                        if (errData && errData.error) notify('⚠️ ' + errData.error);
+                        return null;
+                    });
+                }
                 return res.json();
             })
             .then(function(data) {
@@ -390,85 +452,26 @@
             .catch(function() {});
         }
 
-        var CLIENT_APP_VERSION = '1.3.0';
-        var pendingServerVersion = null;
-        var dismissedVersion = null;
-
-        function checkAndShowUpdateBanner(info) {
-            if (!info || !info.version) return;
-            var target = info.targetRole || 'all';
-            var currentRole = (db && db.currentUser && db.currentUser.role) ? db.currentUser.role : 'spectator';
-
-            if (target !== 'all' && target !== currentRole) return;
-            if (!info.forcedByAdmin && (info.version === CLIENT_APP_VERSION || info.version === dismissedVersion)) return;
-
-            pendingServerVersion = info.version;
-            var box = document.getElementById('update-banner-box');
-            var verEl = document.getElementById('update-banner-version');
-            var notesEl = document.getElementById('update-banner-notes');
-            if (verEl) verEl.textContent = 'v' + info.version;
-            if (notesEl) notesEl.textContent = info.notes || 'Mejoras aplicadas en la plataforma oficial de Liga F7 Caracas.';
-            if (box) box.style.display = 'block';
-        }
-
-        function dismissLiveAppUpdate() {
-            dismissedVersion = pendingServerVersion;
-            var box = document.getElementById('update-banner-box');
-            if (box) box.style.display = 'none';
-        }
-
-        function applyLiveAppUpdate() {
-            var box = document.getElementById('update-banner-box');
-            if (box) box.style.display = 'none';
-            if (pendingServerVersion) CLIENT_APP_VERSION = pendingServerVersion;
-
-            var overlay = document.getElementById('route-loader-overlay');
-            var titleEl = document.getElementById('route-loader-title');
-            var pathEl = document.getElementById('route-loader-path');
-            if (titleEl) titleEl.textContent = '🚀 Aplicando Actualización Oficial v' + (pendingServerVersion || CLIENT_APP_VERSION) + '...';
-            if (pathEl) pathEl.textContent = 'Sincronizando módulos sin perder datos';
-            if (overlay) overlay.classList.add('active');
-
-            setTimeout(function() {
-                if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
-                    window.location.reload();
-                } else {
-                    if (overlay) overlay.classList.remove('active');
-                    renderViewport();
-                    notify('✅ Sistema actualizado a la versión v' + CLIENT_APP_VERSION);
-                }
-            }, 650);
-        }
-
         function initRealtimeSync() {
             if (typeof window.fetch === 'function' && window.location.protocol !== 'file:') {
-                window.fetch('/api/state')
+                // Si había un usuario guardado de una sesión vieja pero sin token JWT, pedir login limpio
+                if (db.currentUser && db.currentUser.role !== 'spectator' && !authToken) {
+                    db.currentUser = null;
+                    saveDB();
+                    renderViewport();
+                }
+                window.fetch('/api/state', { cache: 'no-store' })
                     .then(function(r) { return r.ok ? r.json() : null; })
                     .then(function(state) {
                         if (state) applyServerState(state);
                     })
                     .catch(function() {});
-
-                setInterval(function() {
-                    window.fetch('/api/version')
-                        .then(function(r) { return r.ok ? r.json() : null; })
-                        .then(function(vInfo) {
-                            if (vInfo) checkAndShowUpdateBanner(vInfo);
-                        })
-                        .catch(function() {});
-                }, 45000);
             }
             if (typeof io !== 'undefined' && window.location.protocol !== 'file:') {
                 try {
                     socket = io();
                     socket.on('state_sync', function(remoteState) {
                         applyServerState(remoteState);
-                    });
-                    socket.on('app_version_info', function(vInfo) {
-                        checkAndShowUpdateBanner(vInfo);
-                    });
-                    socket.on('app_update_available', function(vInfo) {
-                        checkAndShowUpdateBanner(vInfo);
                     });
                     socket.on('live_clock_sync', function(clockData) {
                         if (!clockData) return;
@@ -621,14 +624,6 @@
         }
 
         function authenticateWithServer(email, pass, onFail) {
-            var localUser = verifyCredentials(email, pass);
-            if (localUser) {
-                db.currentUser = localUser;
-                selectedPitchStarterId = null;
-                saveDB();
-                renderViewport();
-                notify('🔓 Sesión iniciada: ' + localUser.name);
-            }
             if (typeof window.fetch === 'function' && window.location.protocol !== 'file:') {
                 window.fetch('/api/auth/login', {
                     method: 'POST',
@@ -637,7 +632,7 @@
                 })
                 .then(function(res) {
                     if (!res.ok) {
-                        if (!localUser && typeof onFail === 'function') onFail();
+                        if (typeof onFail === 'function') onFail();
                         return null;
                     }
                     return res.json();
@@ -648,13 +643,29 @@
                     db.currentUser = data.user;
                     selectedPitchStarterId = null;
                     saveDB();
-                    renderViewport();
-                    if (!localUser) notify('🔓 Bienvenido: ' + data.user.name);
+                    window.fetch('/api/state', { cache: 'no-store' })
+                        .then(function(r) { return r.ok ? r.json() : null; })
+                        .then(function(st) {
+                            if (st) applyServerState(st);
+                            else renderViewport();
+                        })
+                        .catch(function() { renderViewport(); });
+                    notify('🔓 Bienvenido: ' + data.user.name);
                 })
                 .catch(function() {
-                    if (!localUser && typeof onFail === 'function') onFail();
+                    if (typeof onFail === 'function') onFail();
                 });
-            } else if (!localUser && typeof onFail === 'function') {
+                return;
+            }
+
+            var localUser = verifyCredentials(email, pass);
+            if (localUser) {
+                db.currentUser = localUser;
+                selectedPitchStarterId = null;
+                saveDB();
+                renderViewport();
+                notify('🔓 Sesión iniciada: ' + localUser.name);
+            } else if (typeof onFail === 'function') {
                 onFail();
             }
         }
@@ -1317,6 +1328,7 @@
                             '<button onclick="openOfficialCarnetModal(\'player\', \'' + pl.id + '\')" class="px-2 py-1.5 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold cursor-pointer">🪪 Carnet</button>' +
                             '<button onclick="openPlayerDossierModal(\'' + pl.id + '\')" class="px-2 py-1.5 rounded-xl bg-slate-800 text-slate-200 text-[11px] font-bold border-0 cursor-pointer">📄 Docs</button>' +
                             actionBtn +
+                            '<button onclick="handleDeletePlayer(\'' + pl.id + '\')" class="px-2 py-1.5 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[11px] font-bold cursor-pointer" title="Eliminar jugador">🗑️</button>' +
                         '</td>' +
                     '</tr>';
                 }
@@ -1446,7 +1458,7 @@
                 var idNum = p.idNumber || 'Sin cédula (Menor)';
                 var joinDate = p.schoolJoinDate || '2024-03-01';
                 var repId = p.repIdNumber || 'No registrada';
-                var hasDoc = Boolean(p.birthCertDoc || p.playerIdDoc || p.repIdDoc);
+                var hasDoc = Boolean(p.hasBirthCert || p.birthCertDoc || p.hasPlayerIdDoc || p.playerIdDoc || p.hasRepIdDoc || p.repIdDoc);
 
                 rows += '<tr class="border-b border-slate-800/70 hover:bg-slate-900/50">' +
                     '<td class="py-3 pl-2 font-mono font-black text-emerald-400 text-sm">#' + p.number + '</td>' +
@@ -1573,6 +1585,10 @@
                     '</div>' +
                     '<h3 class="text-lg font-black text-white m-0">' + tr.name + '</h3>' +
                     '<p class="text-xs text-slate-300 m-0">Formato: ' + tr.format + ' • Inicio: ' + tr.startDate + ' • Premio: <strong class="text-amber-400">' + tr.prize + '</strong></p>' +
+                    '<div class="flex flex-wrap gap-2 text-xs pt-1">' +
+                        '<span class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono font-bold">💵 Inscripción: ' + (tr.registrationFee || '$150 USD') + '</span>' +
+                        '<span class="px-2.5 py-1 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-bold">⚖️ Arbitraje: ' + (tr.refereeFee || '$20 USD') + ' / partido</span>' +
+                    '</div>' +
                     '<div class="text-xs text-slate-400">Clubes inscritos: <strong class="text-white">' + tr.teamIds.length + ' / ' + tr.maxTeams + '</strong></div>' +
                     '<div class="pt-2 flex flex-wrap gap-2">' +
                         (joined
@@ -1822,13 +1838,31 @@
             '</div>';
         }
 
+        function updatePaymentDefaultAmount() {
+            var tSel = document.getElementById('pay-tourney');
+            var cSel = document.getElementById('pay-concept');
+            var aIn = document.getElementById('pay-amount');
+            if (!tSel || !cSel || !aIn) return;
+            var tr = findTournament(tSel.value);
+            if (!tr) return;
+            if (cSel.value === 'Inscripción Oficial de Torneo') {
+                aIn.value = tr.registrationFee || '$150 USD';
+            } else if (cSel.value === 'Arbitraje de Jornada') {
+                aIn.value = tr.refereeFee || '$20 USD';
+            }
+        }
+
         function openNewPaymentModal() {
             var club = findTeam(db.currentUser.teamId);
             pendingUploads = {};
             var tOpts = '';
+            var firstTourney = db.tournaments.length > 0 ? db.tournaments[0] : null;
             for (var i = 0; i < db.tournaments.length; i++) {
-                tOpts += '<option value="' + db.tournaments[i].id + '">' + db.tournaments[i].name + '</option>';
+                var trItem = db.tournaments[i];
+                tOpts += '<option value="' + trItem.id + '">' + trItem.name + ' (Insc: ' + (trItem.registrationFee || '$150 USD') + ' • Arb: ' + (trItem.refereeFee || '$20 USD') + ')</option>';
             }
+
+            var defaultAmt = firstTourney ? (firstTourney.registrationFee || '$150 USD') : '$150 USD';
 
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
@@ -1845,11 +1879,11 @@
                         '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Torneo Correspondiente</label>' +
-                                '<select id="pay-tourney" class="fallback-input">' + tOpts + '</select>' +
+                                '<select id="pay-tourney" onchange="updatePaymentDefaultAmount()" class="fallback-input">' + tOpts + '</select>' +
                             '</div>' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Concepto del Pago</label>' +
-                                '<select id="pay-concept" class="fallback-input">' +
+                                '<select id="pay-concept" onchange="updatePaymentDefaultAmount()" class="fallback-input">' +
                                     '<option value="Inscripción Oficial de Torneo">Inscripción Oficial de Torneo</option>' +
                                     '<option value="Arbitraje de Jornada">Arbitraje de Jornada</option>' +
                                     '<option value="Abono de Inscripción">Abono de Inscripción</option>' +
@@ -1860,7 +1894,7 @@
                         '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Monto Pagado</label>' +
-                                '<input type="text" id="pay-amount" required value="$30 USD" placeholder="Ej: $30 USD o Bs. 1,500" class="fallback-input font-mono font-bold">' +
+                                '<input type="text" id="pay-amount" required value="' + defaultAmt + '" placeholder="Ej: $150 USD" class="fallback-input font-mono font-bold">' +
                             '</div>' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Método de Pago</label>' +
@@ -1930,6 +1964,18 @@
                 if (list[i].id === paymentId) py = list[i];
             }
             if (!py) return;
+            if (!py.receiptDoc && typeof window.fetch === 'function' && window.location.protocol !== 'file:') {
+                window.fetch('/api/payments/' + paymentId + '/receipt')
+                    .then(function(r) { return r.ok ? r.json() : null; })
+                    .then(function(d) {
+                        if (d && d.receiptDoc) {
+                            py.receiptDoc = d.receiptDoc;
+                            var imgEl = document.getElementById('modal-pay-receipt-img');
+                            if (imgEl) imgEl.src = d.receiptDoc;
+                        }
+                    })
+                    .catch(function() {});
+            }
             var club = findTeam(py.teamId);
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
@@ -1948,7 +1994,7 @@
                         '<div><span class="text-slate-500 block text-[10px]">Fecha</span><strong class="text-white">' + py.date + '</strong></div>' +
                     '</div>' +
                     '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800">' +
-                        '<img src="' + (py.receiptDoc || SAMPLE_DOC_SVG) + '" class="w-full rounded-lg" style="max-height:320px; object-fit:contain; background:#020617;" alt="Comprobante">' +
+                        '<img id="modal-pay-receipt-img" src="' + (py.receiptDoc || SAMPLE_DOC_SVG) + '" class="w-full rounded-lg" style="max-height:320px; object-fit:contain; background:#020617;" alt="Comprobante">' +
                     '</div>' +
                 '</div>';
             modal.style.display = 'flex';
@@ -2500,6 +2546,17 @@
             var suggestedDorsal = getFirstFreeDorsal(club.id);
             var occupied = getOccupiedDorsalsList(club.id);
 
+            // Cálculo automático contra calendario y fecha actual:
+            // Edad permitida estrictamente entre 9 años (mínimo) y 40 años (máximo)
+            var now = new Date();
+            var minYear = now.getFullYear() - 40;
+            var maxYear = now.getFullYear() - 9;
+            var monthStr = String(now.getMonth() + 1).padStart(2, '0');
+            var dayStr = String(now.getDate()).padStart(2, '0');
+            var minBirthDate = minYear + '-' + monthStr + '-' + dayStr;
+            var maxBirthDate = maxYear + '-' + monthStr + '-' + dayStr;
+            var todayIso = now.getFullYear() + '-' + monthStr + '-' + dayStr;
+
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
 
@@ -2542,15 +2599,16 @@
                             '</div>' +
                         '</div>' +
 
-                        '<!-- Fecha de Nacimiento, Fecha de Ingreso a la Escuela y Posición -->' +
+                        '<!-- Fecha de Nacimiento (Validada entre 9 y 40 años), Fecha de Ingreso a la Escuela y Posición -->' +
                         '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
                             '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento <span class="text-rose-400">*</span></label>' +
-                                '<input type="date" id="pl-birth-date" required class="fallback-input">' +
+                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento (9 a 40 años) <span class="text-rose-400">*</span></label>' +
+                                '<input type="date" id="pl-birth-date" required min="' + minBirthDate + '" max="' + maxBirthDate + '" onchange="validateModalBirthDateLive()" class="fallback-input">' +
+                                '<div id="pl-birth-live-msg" class="text-[10px] text-slate-400 mt-1">Rango permitido: ' + minYear + ' a ' + maxYear + ' (9 a 40 años)</div>' +
                             '</div>' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Ingreso a la Escuela <span class="text-rose-400">*</span></label>' +
-                                '<input type="date" id="pl-school-join" required class="fallback-input">' +
+                                '<input type="date" id="pl-school-join" required value="' + todayIso + '" max="' + todayIso + '" class="fallback-input">' +
                             '</div>' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Posición en Cancha <span class="text-rose-400">*</span></label>' +
@@ -2577,24 +2635,42 @@
                             '</div>' +
                         '</div>' +
 
-                        '<!-- Cédula del Jugador (Opcional) y Cédula del Representante (Opcional) -->' +
-                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
-                            '<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">' +
-                                '<label class="block font-bold text-slate-300">Cédula del Jugador <span class="text-slate-400 font-normal">(Si la tiene)</span></label>' +
-                                '<input type="text" id="pl-id-number" placeholder="Ej: V-31450922 (Opcional)" class="fallback-input">' +
-                                '<label class="block text-[11px] text-cyan-400 font-bold pt-1">📷 Subir Foto de Cédula del Jugador (Opcional):</label>' +
-                                '<input type="file" accept="image/*" onchange="handleDocFileSelect(this, \'playerIdDoc\', \'st-pl-id-doc\', \'pr-pl-id-doc\')" class="text-[11px] text-slate-300 w-full">' +
-                                '<div id="st-pl-id-doc" class="text-[10px] text-slate-500">Opcional si el jugador posee cédula</div>' +
-                                '<img id="pr-pl-id-doc" style="display:none; max-height:90px; border-radius:8px; border:1px solid #334155;" alt="Vista previa cédula jugador">' +
+                        '<!-- Pregunta Obligatoria: ¿El jugador tiene Cédula de Identidad? -->' +
+                        '<div class="p-3.5 rounded-xl bg-slate-900 border border-cyan-500/30 space-y-3">' +
+                            '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">' +
+                                '<label class="font-bold text-cyan-300">🪪 ¿El jugador posee Cédula de Identidad? <span class="text-rose-400">*</span></label>' +
+                                '<select id="pl-has-id-card" onchange="togglePlayerIdCardBox()" class="fallback-input">' +
+                                    '<option value="no" selected>No posee Cédula de Identidad (Menor sin cédula)</option>' +
+                                    '<option value="yes">Sí, el jugador posee Cédula de Identidad</option>' +
+                                '</select>' +
                             '</div>' +
+                            '<div id="player-id-card-fields" style="display:none;" class="p-3.5 rounded-xl bg-cyan-500/10 border border-cyan-500/40 space-y-2.5">' +
+                                '<div>' +
+                                    '<label class="block font-bold text-cyan-300 mb-1">Número de Cédula de Identidad del Jugador <span class="text-rose-400">(OBLIGATORIO *)</span></label>' +
+                                    '<input type="text" id="pl-id-number" placeholder="Ej: V-31450922" class="fallback-input">' +
+                                '</div>' +
+                                '<div>' +
+                                    '<label class="block font-black text-cyan-300 mb-1">📷 Imagen de la Cédula / Identificación del Jugador <span class="text-rose-400">(OBLIGATORIO *)</span></label>' +
+                                    '<input type="file" id="pl-id-doc-file" accept="image/*" onchange="handleDocFileSelect(this, \'playerIdDoc\', \'st-pl-id-doc\', \'pr-pl-id-doc\')" class="text-xs text-slate-200 w-full">' +
+                                    '<div id="st-pl-id-doc" class="text-[11px] text-amber-300 mt-1">⚠️ Es obligatorio adjuntar la foto legible de la cédula de identidad del jugador.</div>' +
+                                    '<img id="pr-pl-id-doc" style="display:none; max-height:110px; border-radius:10px; border:1px solid #06B6D4; margin-top:6px;" alt="Vista previa cédula jugador">' +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
 
-                            '<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">' +
-                                '<label class="block font-bold text-slate-300">Cédula del Representante <span class="text-slate-400 font-normal">(Opcional)</span></label>' +
-                                '<input type="text" id="pl-rep-id" placeholder="Ej: V-15890211 (Opcional)" class="fallback-input">' +
-                                '<label class="block text-[11px] text-cyan-400 font-bold pt-1">📷 Subir Foto de Cédula Representante (Opcional):</label>' +
-                                '<input type="file" accept="image/*" onchange="handleDocFileSelect(this, \'repIdDoc\', \'st-rep-id-doc\', \'pr-rep-id-doc\')" class="text-[11px] text-slate-300 w-full">' +
-                                '<div id="st-rep-id-doc" class="text-[10px] text-slate-500">Documento opcional del representante</div>' +
-                                '<img id="pr-rep-id-doc" style="display:none; max-height:90px; border-radius:8px; border:1px solid #334155;" alt="Vista previa cédula representante">' +
+                        '<!-- Cédula del Representante (Opcional) -->' +
+                        '<div class="p-3 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">' +
+                            '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                                '<div>' +
+                                    '<label class="block font-bold text-slate-300 mb-1">Cédula del Representante <span class="text-slate-400 font-normal">(Opcional)</span></label>' +
+                                    '<input type="text" id="pl-rep-id" placeholder="Ej: V-15890211 (Opcional)" class="fallback-input">' +
+                                '</div>' +
+                                '<div>' +
+                                    '<label class="block text-[11px] text-cyan-400 font-bold mb-1">📷 Subir Foto de Cédula Representante (Opcional):</label>' +
+                                    '<input type="file" accept="image/*" onchange="handleDocFileSelect(this, \'repIdDoc\', \'st-rep-id-doc\', \'pr-rep-id-doc\')" class="text-[11px] text-slate-300 w-full">' +
+                                    '<div id="st-rep-id-doc" class="text-[10px] text-slate-500">Documento opcional del representante</div>' +
+                                    '<img id="pr-rep-id-doc" style="display:none; max-height:90px; border-radius:8px; border:1px solid #334155;" alt="Vista previa cédula representante">' +
+                                '</div>' +
                             '</div>' +
                         '</div>' +
 
@@ -2644,6 +2720,44 @@
             modal.style.display = 'flex';
         }
 
+        function computeExactAgeYears(birthDateStr) {
+            if (!birthDateStr) return -1;
+            var parts = birthDateStr.split('-');
+            if (parts.length < 3) return -1;
+            var bYear = parseInt(parts[0], 10);
+            var bMonth = parseInt(parts[1], 10) - 1;
+            var bDay = parseInt(parts[2], 10);
+            if (isNaN(bYear) || isNaN(bMonth) || isNaN(bDay)) return -1;
+            var today = new Date();
+            var age = today.getFullYear() - bYear;
+            var mDiff = today.getMonth() - bMonth;
+            if (mDiff < 0 || (mDiff === 0 && today.getDate() < bDay)) {
+                age--;
+            }
+            return age;
+        }
+
+        function validateModalBirthDateLive() {
+            var inputEl = document.getElementById('pl-birth-date');
+            var msgEl = document.getElementById('pl-birth-live-msg');
+            if (!inputEl || !msgEl) return;
+            var age = computeExactAgeYears(inputEl.value);
+            if (age < 9) {
+                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido: el jugador tiene ' + (age < 0 ? 0 : age) + ' años (mínimo 9 años cumplidos).</span>';
+            } else if (age > 40) {
+                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido: el jugador tiene ' + age + ' años (máximo 40 años).</span>';
+            } else {
+                msgEl.innerHTML = '<span class="text-emerald-400 font-bold">✅ Edad válida: ' + age + ' años.</span>';
+            }
+        }
+
+        function togglePlayerIdCardBox() {
+            var sel = document.getElementById('pl-has-id-card');
+            var box = document.getElementById('player-id-card-fields');
+            if (!sel || !box) return;
+            box.style.display = (sel.value === 'yes') ? 'block' : 'none';
+        }
+
         function checkModalDorsalAvailability() {
             var club = findTeam(db.currentUser.teamId);
             var inputEl = document.getElementById('pl-dorsal');
@@ -2681,10 +2795,21 @@
             var schoolJoinDate = document.getElementById('pl-school-join').value;
             var pos = document.getElementById('pl-pos').value;
             var dorsal = parseInt(document.getElementById('pl-dorsal').value, 10);
-            var idNumber = document.getElementById('pl-id-number').value.trim();
+            var hasIdCard = (document.getElementById('pl-has-id-card').value === 'yes');
+            var idNumber = hasIdCard ? document.getElementById('pl-id-number').value.trim() : '';
             var repIdNumber = document.getElementById('pl-rep-id').value.trim();
             var hasSpecial = (document.getElementById('pl-has-special').value === 'yes');
             var specialDetail = document.getElementById('pl-special-detail').value.trim();
+
+            // Validación estricta de fecha de nacimiento contra calendario actual (entre 9 y 40 años)
+            var ageYears = computeExactAgeYears(birthDate);
+            if (ageYears < 9 || ageYears > 40) {
+                if (errEl) {
+                    errEl.textContent = '❌ Fecha de nacimiento inválida (' + (ageYears < 0 ? 'fecha futura' : ageYears + ' años') + '): el jugador debe tener entre 9 años (mínimo) y 40 años (máximo) según la fecha actual.';
+                    errEl.style.display = 'block';
+                }
+                return;
+            }
 
             var takenBy = findPlayerByDorsal(club.id, dorsal);
             if (takenBy) {
@@ -2693,6 +2818,23 @@
                     errEl.style.display = 'block';
                 }
                 return;
+            }
+
+            if (hasIdCard) {
+                if (!idNumber) {
+                    if (errEl) {
+                        errEl.textContent = '❌ Indicaste que el jugador posee Cédula de Identidad: debes escribir su número de cédula.';
+                        errEl.style.display = 'block';
+                    }
+                    return;
+                }
+                if (!pendingUploads.playerIdDoc) {
+                    if (errEl) {
+                        errEl.textContent = '❌ Es OBLIGATORIO adjuntar la imagen de la identificación (Cédula de Identidad) del jugador.';
+                        errEl.style.display = 'block';
+                    }
+                    return;
+                }
             }
 
             if (!pendingUploads.birthCertDoc) {
@@ -2720,6 +2862,7 @@
                 firstName: firstName,
                 lastName: lastName,
                 birthDate: birthDate,
+                hasIdCard: hasIdCard,
                 idNumber: idNumber,
                 schoolJoinDate: schoolJoinDate,
                 repIdNumber: repIdNumber,
@@ -2727,9 +2870,13 @@
                 specialConditionDetail: hasSpecial ? specialDetail : '',
                 photoUrl: pendingUploads.playerPhoto || null,
                 birthCertDoc: pendingUploads.birthCertDoc,
-                playerIdDoc: pendingUploads.playerIdDoc || null,
+                playerIdDoc: hasIdCard ? pendingUploads.playerIdDoc : null,
                 repIdDoc: pendingUploads.repIdDoc || null,
                 specialConditionDoc: hasSpecial ? pendingUploads.specialConditionDoc : null,
+                hasBirthCert: true,
+                hasPlayerIdDoc: !!(hasIdCard && pendingUploads.playerIdDoc),
+                hasRepIdDoc: !!pendingUploads.repIdDoc,
+                hasSpecialDoc: !!(hasSpecial && pendingUploads.specialConditionDoc),
                 pos: pos,
                 status: 'Disponible',
                 starter: false,
@@ -2748,6 +2895,31 @@
         function openPlayerDossierModal(playerId) {
             var p = findPlayer(playerId);
             if (!p) return;
+
+            if (window.location.protocol !== 'file:' && !p.birthCertDoc && (p.hasBirthCert || p.hasPlayerIdDoc || p.hasRepIdDoc || p.hasSpecialDoc)) {
+                notify('⏳ Cargando documentos digitalizados del jugador...');
+                fetch('/api/players/' + encodeURIComponent(playerId) + '/docs', {
+                    headers: authToken ? { 'Authorization': 'Bearer ' + authToken } : {}
+                })
+                    .then(function(r) { return r.ok ? r.json() : null; })
+                    .then(function(data) {
+                        if (data) {
+                            p.birthCertDoc = data.birthCertDoc || SAMPLE_DOC_SVG;
+                            p.playerIdDoc = data.playerIdDoc || null;
+                            p.repIdDoc = data.repIdDoc || null;
+                            p.specialConditionDoc = data.specialConditionDoc || null;
+                        } else {
+                            p.birthCertDoc = SAMPLE_DOC_SVG;
+                        }
+                        openPlayerDossierModal(playerId);
+                    })
+                    .catch(function() {
+                        p.birthCertDoc = SAMPLE_DOC_SVG;
+                        openPlayerDossierModal(playerId);
+                    });
+                return;
+            }
+
             var club = findTeam(p.teamId);
             var birthCertImg = p.birthCertDoc || SAMPLE_DOC_SVG;
 
@@ -2970,6 +3142,31 @@
                 }
             }
             if (!st) return;
+
+            if (window.location.protocol !== 'file:' && !st.idDoc && (st.hasIdDoc || st.hasLicenseDoc)) {
+                notify('⏳ Cargando documentos del cuerpo técnico...');
+                fetch('/api/staff/' + encodeURIComponent(staffId) + '/docs', {
+                    headers: authToken ? { 'Authorization': 'Bearer ' + authToken } : {}
+                })
+                    .then(function(r) { return r.ok ? r.json() : null; })
+                    .then(function(data) {
+                        if (data) {
+                            st.idDoc = data.idDoc || SAMPLE_DOC_SVG;
+                            st.licenseDoc = data.licenseDoc || SAMPLE_DOC_SVG;
+                        } else {
+                            st.idDoc = SAMPLE_DOC_SVG;
+                            st.licenseDoc = SAMPLE_DOC_SVG;
+                        }
+                        openStaffDossierModal(staffId);
+                    })
+                    .catch(function() {
+                        st.idDoc = SAMPLE_DOC_SVG;
+                        st.licenseDoc = SAMPLE_DOC_SVG;
+                        openStaffDossierModal(staffId);
+                    });
+                return;
+            }
+
             var club = findTeam(st.teamId);
 
             var modal = document.getElementById('global-modal');
@@ -3285,15 +3482,22 @@
 
         function refSetMatchState(matchId, newState) {
             stopRefTimer();
+            var targetMinute = 0;
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
                     db.matches[i].status = newState;
-                    if (newState === 'live' && db.matches[i].minute === 0) db.matches[i].minute = 1;
+                    if (newState === 'live' && (!db.matches[i].minute || db.matches[i].minute === 0)) {
+                        db.matches[i].minute = 1;
+                    }
+                    targetMinute = db.matches[i].minute || 1;
                 }
             }
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/matches/' + matchId + '/state', { status: newState });
+            apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                status: newState,
+                minute: targetMinute
+            });
             notify(newState === 'live' ? '🟢 Partido iniciado (EN VIVO)' : '🏁 Partido finalizado oficialmente');
         }
 
@@ -3377,7 +3581,7 @@
                     timerSeconds = 0;
                     target.minute = (target.minute || 0) + 1;
                     saveDB();
-                    apiRequest('PUT', '/api/matches/' + matchId + '/state', { minute: target.minute });
+                    apiRequest('PUT', '/api/matches/' + matchId + '/state', { minute: target.minute, tickOnly: true });
                 }
                 if (socket) {
                     socket.emit('referee_clock_tick', {
@@ -3520,6 +3724,8 @@
         // =========================================================================
 
         function renderOrganizerDashboard() {
+            var now = new Date();
+            var todayIso = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
             var tCards = '';
             for (var i = 0; i < db.tournaments.length; i++) {
                 var t = db.tournaments[i];
@@ -3540,6 +3746,9 @@
                     if (db.matches[mIdx].tournamentId === t.id) tMatchCount++;
                 }
 
+                var regFee = t.registrationFee || '$150 USD';
+                var refFee = t.refereeFee || '$20 USD';
+
                 tCards += '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
                     '<div class="flex flex-wrap items-center justify-between gap-2">' +
                         '<div class="flex items-center gap-2">' +
@@ -3549,10 +3758,14 @@
                         '<span class="text-xs font-mono text-emerald-400 font-bold">Equipos en el Torneo: ' + t.teamIds.length + '/' + t.maxTeams + ' • Partidos: ' + tMatchCount + '</span>' +
                     '</div>' +
                     '<h3 class="text-lg font-black text-white m-0">' + t.name + '</h3>' +
-                    '<p class="text-xs text-slate-400 m-0">' + t.format + ' • Inicio: ' + t.startDate + ' • Premio: <strong class="text-amber-400">' + t.prize + '</strong></p>' +
+                    '<p class="text-xs text-slate-400 m-0">' + t.format + ' • Inicio: <strong class="text-white">' + t.startDate + '</strong> • Premio: <strong class="text-amber-400">' + t.prize + '</strong></p>' +
+                    '<div class="flex flex-wrap gap-2 pt-0.5">' +
+                        '<span class="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">💵 Inscripción: ' + regFee + '</span>' +
+                        '<span class="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-xs font-bold">⚖️ Arbitraje: ' + refFee + ' / partido</span>' +
+                    '</div>' +
                     '<div class="space-y-1.5 pt-1">' +
                         '<span class="text-[11px] font-bold text-slate-400 block">Clubes participantes (clic para agregar/quitar del torneo):</span>' +
-                        '<div class="flex flex-wrap gap-1.5">' + clubTags + '</div>' +
+                        '<div class="flex flex-wrap gap-1.5">' + (clubTags || '<span class="text-xs text-slate-500">No hay clubes registrados aún.</span>') + '</div>' +
                     '</div>' +
                     '<div class="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">' +
                         '<div class="flex flex-wrap gap-1.5">' +
@@ -3579,7 +3792,7 @@
                             '<form onsubmit="handleAdminCreateTourney(event)" class="space-y-3">' +
                                 '<div>' +
                                     '<label class="block text-xs font-bold text-slate-300 mb-1">Nombre del Torneo</label>' +
-                                    '<input type="text" id="adm-t-name" required placeholder="Ej: Copa Clausura Ángel Arena" class="fallback-input">' +
+                                    '<input type="text" id="adm-t-name" required placeholder="Ej: Copa Clausura Liga F7 Caracas" class="fallback-input">' +
                                 '</div>' +
                                 '<div class="grid grid-cols-2 gap-2.5">' +
                                     '<div>' +
@@ -3614,15 +3827,25 @@
                                         '</select>' +
                                     '</div>' +
                                     '<div>' +
-                                        '<label class="block text-xs font-bold text-slate-300 mb-1">Fecha Inicio</label>' +
-                                        '<input type="text" id="adm-t-date" required value="15 Ene 2027" class="fallback-input">' +
+                                        '<label class="block text-xs font-bold text-slate-300 mb-1">📅 Fecha de Inicio</label>' +
+                                        '<input type="date" id="adm-t-date" required value="' + todayIso + '" class="fallback-input">' +
                                     '</div>' +
                                     '<div>' +
                                         '<label class="block text-xs font-bold text-slate-300 mb-1">Premio Oficial</label>' +
                                         '<input type="text" id="adm-t-prize" required value="$4,000 USD" class="fallback-input">' +
                                     '</div>' +
                                 '</div>' +
-                                '<button type="submit" class="btn-primary-gradient w-full py-3 text-xs font-black">🚀 Publicar Torneo para Todos los Equipos</button>' +
+                                '<div class="grid grid-cols-2 gap-2.5">' +
+                                    '<div>' +
+                                        '<label class="block text-xs font-bold text-emerald-300 mb-1">💵 Costo de Inscripción</label>' +
+                                        '<input type="text" id="adm-t-reg-fee" required value="$150 USD" placeholder="Ej: $150 USD" class="fallback-input">' +
+                                    '</div>' +
+                                    '<div>' +
+                                        '<label class="block text-xs font-bold text-cyan-300 mb-1">⚖️ Pago de Arbitraje (por partido)</label>' +
+                                        '<input type="text" id="adm-t-ref-fee" required value="$20 USD" placeholder="Ej: $20 USD" class="fallback-input">' +
+                                    '</div>' +
+                                '</div>' +
+                                '<button type="submit" class="btn-primary-gradient w-full py-3 text-xs font-black">🚀 Crear Torneo Oficial</button>' +
                             '</form>' +
                         '</div>' +
                         '<div class="lg:col-span-7 space-y-4">' + tCards + '</div>' +
@@ -3648,9 +3871,8 @@
                             '</div>' +
                         '</div>' +
                         '<div class="flex flex-wrap gap-2">' +
-                            '<button onclick="openRegisterClubModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">➕ Registrar Nuevo Club</button>' +
                             '<button onclick="openAdminSecurityModal()" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🔐 Árbitros & Mi Clave</button>' +
-                            '<button onclick="adminSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'tournaments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Torneos & Playoffs</button>' +
+                            '<button onclick="adminSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'tournaments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Torneos</button>' +
                             '<button onclick="adminSection=\'audit\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'audit' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🛡️ Clubes & Auditoría (' + db.teams.length + ')</button>' +
                             '<button onclick="adminSection=\'payments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'payments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">💳 Finanzas & Solvencia</button>' +
                             '<button onclick="adminSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'calendar' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Calendario</button>' +
@@ -4160,28 +4382,6 @@
                         '</div>' +
                     '</div>' +
 
-                    '<form onsubmit="handleAdminBroadcastUpdate(event)" class="p-4 rounded-2xl bg-slate-900/90 border border-emerald-500/40 space-y-3 text-xs">' +
-                        '<div class="flex flex-wrap items-center justify-between gap-2">' +
-                            '<div class="font-black text-emerald-400 uppercase">🚀 Notificar Actualización en Vivo a Usuarios Conectados</div>' +
-                            '<span class="text-[10px] font-mono text-slate-400">Versión actual: v' + CLIENT_APP_VERSION + '</span>' +
-                        '</div>' +
-                        '<div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">' +
-                            '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">A quién avisar</label>' +
-                                '<select id="adm-upd-role" class="fallback-input">' +
-                                    '<option value="all">🌐 Todos los Usuarios</option>' +
-                                    '<option value="referee">⚖️ Solo Árbitros</option>' +
-                                    '<option value="club">🛡️ Solo Dueños de Club</option>' +
-                                '</select>' +
-                            '</div>' +
-                            '<div class="sm:col-span-2">' +
-                                '<label class="block font-bold text-slate-300 mb-1">Nota de la Mejora / Cambio</label>' +
-                                '<input type="text" id="adm-upd-notes" required value="Nuevas mejoras disponibles en tu panel oficial de Liga F7 Caracas." class="fallback-input">' +
-                            '</div>' +
-                        '</div>' +
-                        '<button type="submit" class="btn-primary-gradient w-full py-2.5 text-xs font-black">📢 Enviar Aviso de "¡Nueva Actualización Disponible!" Ahora</button>' +
-                    '</form>' +
-
                     '<div class="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex flex-wrap items-center justify-between gap-3 text-xs">' +
                         '<div>' +
                             '<strong class="text-rose-300 block uppercase">🧹 Limpieza General Post-Pruebas</strong>' +
@@ -4209,27 +4409,6 @@
             renderViewport();
             apiRequest('POST', '/api/system/reset');
             notify('🧹 Todos los clubes, jugadores y torneos de prueba fueron eliminados (Sistema en 0)');
-        }
-
-        function handleAdminBroadcastUpdate(e) {
-            e.preventDefault();
-            var targetRole = document.getElementById('adm-upd-role').value;
-            var notes = document.getElementById('adm-upd-notes').value.trim();
-            var nextVer = '1.' + (Math.floor(Date.now() / 1000) % 1000);
-
-            closeGlobalModal();
-            checkAndShowUpdateBanner({
-                version: nextVer,
-                notes: notes,
-                targetRole: 'all',
-                forcedByAdmin: true
-            });
-            apiRequest('POST', '/api/admin/broadcast-update', {
-                version: nextVer,
-                notes: notes,
-                targetRole: targetRole
-            });
-            notify('🚀 Aviso de actualización enviado en tiempo real');
         }
 
         function handleCreateReferee(e) {
@@ -4752,12 +4931,10 @@
             var max = parseInt(document.getElementById('adm-t-max').value, 10) || 8;
             var date = document.getElementById('adm-t-date').value.trim();
             var prize = document.getElementById('adm-t-prize').value.trim();
-
-            // Incluir automáticamente todos los equipos existentes en el sistema (hasta el cupo máximo)
-            var allExistingTeamIds = [];
-            for (var i = 0; i < db.teams.length && allExistingTeamIds.length < max; i++) {
-                allExistingTeamIds.push(db.teams[i].id);
-            }
+            var regFeeEl = document.getElementById('adm-t-reg-fee');
+            var refFeeEl = document.getElementById('adm-t-ref-fee');
+            var registrationFee = regFeeEl ? regFeeEl.value.trim() : '$150 USD';
+            var refereeFee = refFeeEl ? refFeeEl.value.trim() : '$20 USD';
 
             var newId = 'tour-' + Date.now();
             db.tournaments.unshift({
@@ -4769,8 +4946,10 @@
                 maxTeams: max,
                 startDate: date,
                 prize: prize,
+                registrationFee: registrationFee,
+                refereeFee: refereeFee,
                 status: 'open',
-                teamIds: allExistingTeamIds
+                teamIds: []
             });
             activeTourneyId = newId;
             saveDB();
@@ -4782,30 +4961,24 @@
                 maxTeams: max,
                 startDate: date,
                 prize: prize,
-                teamIds: allExistingTeamIds
+                registrationFee: registrationFee,
+                refereeFee: refereeFee,
+                teamIds: []
             }, function(data) {
                 if (data.tournamentId) {
                     activeTourneyId = data.tournamentId;
                     renderViewport();
                 }
             });
-            notify('🚀 Torneo "' + name + '" creado con ' + allExistingTeamIds.length + ' clubes listos para generar calendario');
+            notify('🚀 Torneo "' + name + '" creado. Ahora selecciona qué clubes participarán en este torneo.');
         }
 
         function generateTourneyFixture(tourneyId) {
             var t = findTournament(tourneyId);
             if (!t) return;
 
-            // Si el torneo tiene menos de 2 clubes, incluir automáticamente todos los clubes existentes en el sistema
             if (!t.teamIds || t.teamIds.length < 2) {
-                t.teamIds = [];
-                for (var k = 0; k < db.teams.length && t.teamIds.length < t.maxTeams; k++) {
-                    t.teamIds.push(db.teams[k].id);
-                }
-            }
-
-            if (t.teamIds.length < 2) {
-                notify('⚠️ Se necesitan al menos 2 clubes en el sistema para generar el calendario');
+                notify('⚠️ Selecciona al menos 2 clubes participantes en el torneo antes de generar el calendario');
                 return;
             }
 

@@ -41,11 +41,6 @@ let pool = createDbPool();
 
 let dbReady = false;
 const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_cambiar_en_railway';
-let currentAppVersion = process.env.APP_VERSION || '1.3.0';
-let currentReleaseNotes =
-  process.env.APP_RELEASE_NOTES ||
-  'Módulo Guante de Oro para porteros, carnets con QR real escaneable y pantalla de carga oficial.';
-let currentTargetRole = 'all'; // 'all' | 'referee' | 'club' | 'admin'
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -127,6 +122,8 @@ async function initDatabase() {
       await client.query(`ALTER TABLE players ALTER COLUMN coord_x DROP DEFAULT`);
       await client.query(`ALTER TABLE players ALTER COLUMN coord_y DROP DEFAULT`);
       await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
+      await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS registration_fee VARCHAR(50) DEFAULT '$150 USD'`);
+      await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS referee_fee VARCHAR(50) DEFAULT '$20 USD'`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
       await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS goals_conceded INTEGER DEFAULT 0`);
       await client.query(`ALTER TABLE match_events ADD COLUMN IF NOT EXISTS conceded_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
@@ -177,9 +174,27 @@ async function getFullState(clientOrPool = pool) {
     clientOrPool.query('SELECT * FROM tournaments ORDER BY id DESC'),
     clientOrPool.query("SELECT * FROM tournament_registrations WHERE status = 'approved' ORDER BY registered_at ASC"),
     clientOrPool.query('SELECT tm.*, u.email AS owner_email FROM teams tm LEFT JOIN users u ON tm.owner_id = u.id ORDER BY tm.id ASC'),
-    clientOrPool.query('SELECT * FROM players ORDER BY team_id ASC, sort_order ASC, id ASC'),
-    clientOrPool.query('SELECT * FROM club_staff ORDER BY team_id ASC, id ASC'),
-    clientOrPool.query('SELECT * FROM club_payments ORDER BY id DESC'),
+    clientOrPool.query(`
+      SELECT id, team_id, full_name, first_name, last_name, birth_date, id_number, school_join_date, rep_id_number,
+             has_special_condition, special_condition_detail, photo_url,
+             (birth_cert_doc IS NOT NULL AND birth_cert_doc <> '') AS has_birth_cert,
+             (player_id_doc IS NOT NULL AND player_id_doc <> '') AS has_player_id_doc,
+             (rep_id_doc IS NOT NULL AND rep_id_doc <> '') AS has_rep_id_doc,
+             (special_condition_doc IS NOT NULL AND special_condition_doc <> '') AS has_special_doc,
+             doc_status, dorsal, position, status, is_starter, coord_x, coord_y, sort_order
+      FROM players ORDER BY team_id ASC, sort_order ASC, id ASC
+    `),
+    clientOrPool.query(`
+      SELECT id, team_id, first_name, last_name, role_title, id_number, birth_date, phone, join_date,
+             (id_doc IS NOT NULL AND id_doc <> '') AS has_id_doc,
+             (license_doc IS NOT NULL AND license_doc <> '') AS has_license_doc
+      FROM club_staff ORDER BY team_id ASC, id ASC
+    `),
+    clientOrPool.query(`
+      SELECT id, team_id, tournament_id, concept, amount, method, reference, payment_date, status,
+             (receipt_doc IS NOT NULL AND receipt_doc <> '') AS has_receipt_doc
+      FROM club_payments ORDER BY id DESC
+    `),
     clientOrPool.query('SELECT * FROM matches ORDER BY id ASC'),
     clientOrPool.query('SELECT * FROM match_events ORDER BY id ASC'),
     clientOrPool.query("SELECT id, name, email FROM users WHERE role = 'referee' ORDER BY id ASC")
@@ -206,6 +221,8 @@ async function getFullState(clientOrPool = pool) {
       maxTeams: t.max_teams,
       startDate: String(t.start_date),
       prize: t.prize || '',
+      registrationFee: t.registration_fee || '$150 USD',
+      refereeFee: t.referee_fee || '$20 USD',
       status: t.status,
       teamIds: regsByTourney[t.id] || []
     })),
@@ -236,10 +253,10 @@ async function getFullState(clientOrPool = pool) {
         hasSpecialCondition: Boolean(p.has_special_condition),
         specialConditionDetail: p.special_condition_detail || '',
         photoUrl: p.photo_url || null,
-        birthCertDoc: p.birth_cert_doc || null,
-        playerIdDoc: p.player_id_doc || null,
-        repIdDoc: p.rep_id_doc || null,
-        specialConditionDoc: p.special_condition_doc || null,
+        hasBirthCert: Boolean(p.has_birth_cert),
+        hasPlayerIdDoc: Boolean(p.has_player_id_doc),
+        hasRepIdDoc: Boolean(p.has_rep_id_doc),
+        hasSpecialDoc: Boolean(p.has_special_doc),
         docStatus: p.doc_status || 'approved',
         pos: p.position,
         status: p.status,
@@ -259,8 +276,8 @@ async function getFullState(clientOrPool = pool) {
       birthDate: s.birth_date || '',
       phone: s.phone || '',
       joinDate: s.join_date || '',
-      idDoc: s.id_doc || null,
-      licenseDoc: s.license_doc || null
+      hasIdDoc: Boolean(s.has_id_doc),
+      hasLicenseDoc: Boolean(s.has_license_doc)
     })),
     payments: paymentsRes.rows.map((py) => ({
       id: 'pay-' + py.id,
@@ -271,7 +288,7 @@ async function getFullState(clientOrPool = pool) {
       method: py.method,
       reference: py.reference,
       date: py.payment_date,
-      receiptDoc: py.receipt_doc || null,
+      hasReceiptDoc: Boolean(py.has_receipt_doc),
       status: py.status || 'pending'
     })),
     matches: matchesRes.rows.map((m) => ({
@@ -333,47 +350,58 @@ function authorizeRoles(...allowedRoles) {
 }
 
 // ==========================================
-// 0. ESTADO GLOBAL, VERSIÓN Y SALUD DEL SERVIDOR
+// 0. ESTADO GLOBAL Y SALUD DEL SERVIDOR
 // ==========================================
 app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    dbReady,
-    version: currentAppVersion,
-    notes: currentReleaseNotes,
-    targetRole: currentTargetRole
-  });
+  res.json({ ok: true, dbReady });
 });
 
-app.get('/api/version', (req, res) => {
-  res.json({
-    version: currentAppVersion,
-    notes: currentReleaseNotes,
-    targetRole: currentTargetRole
-  });
+app.get('/api/players/:playerId/docs', async (req, res) => {
+  if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
+  try {
+    const playerId = parseId(req.params.playerId);
+    const r = await pool.query(
+      'SELECT birth_cert_doc, player_id_doc, rep_id_doc, special_condition_doc FROM players WHERE id = $1',
+      [playerId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Jugador no encontrado' });
+    const row = r.rows[0];
+    res.json({
+      birthCertDoc: row.birth_cert_doc || null,
+      playerIdDoc: row.player_id_doc || null,
+      repIdDoc: row.rep_id_doc || null,
+      specialConditionDoc: row.special_condition_doc || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/admin/broadcast-update', authenticateToken, authorizeRoles('admin'), (req, res) => {
-  const { version, notes, targetRole } = req.body;
-  currentAppVersion = (version && String(version).trim()) || '1.3.' + Math.floor(Date.now() / 1000);
-  currentReleaseNotes =
-    (notes && String(notes).trim()) ||
-    'Nueva actualización oficial disponible en Liga F7 Caracas.';
-  currentTargetRole = targetRole || 'all';
+app.get('/api/staff/:staffId/docs', async (req, res) => {
+  if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
+  try {
+    const staffId = parseId(req.params.staffId);
+    const r = await pool.query('SELECT id_doc, license_doc FROM club_staff WHERE id = $1', [staffId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Integrante no encontrado' });
+    res.json({
+      idDoc: r.rows[0].id_doc || null,
+      licenseDoc: r.rows[0].license_doc || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  io.emit('app_update_available', {
-    version: currentAppVersion,
-    notes: currentReleaseNotes,
-    targetRole: currentTargetRole,
-    forcedByAdmin: true
-  });
-
-  res.json({
-    message: 'Aviso de actualización enviado en tiempo real a los usuarios conectados.',
-    version: currentAppVersion,
-    notes: currentReleaseNotes,
-    targetRole: currentTargetRole
-  });
+app.get('/api/payments/:paymentId/receipt', async (req, res) => {
+  if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
+  try {
+    const paymentId = parseId(req.params.paymentId);
+    const r = await pool.query('SELECT receipt_doc FROM club_payments WHERE id = $1', [paymentId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Pago no encontrado' });
+    res.json({ receiptDoc: r.rows[0].receipt_doc || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/state', async (req, res) => {
@@ -432,7 +460,7 @@ app.post('/api/auth/login', async (req, res) => {
     const token = jwt.sign(
       { id: user.id, name: user.name, email: user.email, role: user.role, teamId: numericTeamId },
       JWT_SECRET,
-      { expiresIn: '12h' }
+      { expiresIn: '30d' }
     );
 
     await pool.query(
@@ -736,6 +764,29 @@ app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, 
       });
     }
 
+    // Validar que la fecha de nacimiento esté entre 9 y 40 años respecto a la fecha actual
+    const bParts = String(birthDate).split('-');
+    if (bParts.length === 3) {
+      const bDateObj = new Date(Number(bParts[0]), Number(bParts[1]) - 1, Number(bParts[2]));
+      const now = new Date();
+      let ageYears = now.getFullYear() - bDateObj.getFullYear();
+      const mDiff = now.getMonth() - bDateObj.getMonth();
+      if (mDiff < 0 || (mDiff === 0 && now.getDate() < bDateObj.getDate())) {
+        ageYears--;
+      }
+      if (ageYears < 9 || ageYears > 40) {
+        return res.status(400).json({
+          error: `La edad del jugador (${ageYears} años) no es válida. Debe tener entre 9 y 40 años.`
+        });
+      }
+    }
+
+    if (req.body.hasIdCard && (!idNumber || !playerIdDoc)) {
+      return res.status(400).json({
+        error: 'Si el jugador posee Cédula de Identidad, debes indicar el número y subir obligatoriamente la foto de su identificación.'
+      });
+    }
+
     if (hasSpecialCondition && (!specialConditionDetail || !specialConditionDoc)) {
       return res.status(400).json({
         error: 'Debes especificar cuál es la condición especial y adjuntar el documento de soporte.'
@@ -1025,32 +1076,25 @@ app.delete('/api/staff/:staffId', authenticateToken, authorizeRoles('club'), asy
 app.post('/api/tournaments', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, pitchSize, category, maxTeams, startDate, prize } = req.body;
+    const { name, pitchSize, category, maxTeams, startDate, prize, registrationFee, refereeFee } = req.body;
     const cleanSize = pitchSize === '11v11' ? '11v11' : pitchSize === '7v7' ? '7v7' : '5v5';
     const formatText = category ? `Liga + Playoffs (${category})` : 'Liga + Playoffs';
     const limitTeams = Number(maxTeams) || 8;
+    const regFeeText = (registrationFee && String(registrationFee).trim()) || '$150 USD';
+    const refFeeText = (refereeFee && String(refereeFee).trim()) || '$20 USD';
 
     await client.query('BEGIN');
     const ins = await client.query(
-      `INSERT INTO tournaments (name, format, pitch_size, max_teams, start_date, prize, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'open') RETURNING id`,
-      [name, formatText, cleanSize, limitTeams, startDate, prize]
+      `INSERT INTO tournaments (name, format, pitch_size, max_teams, start_date, prize, registration_fee, referee_fee, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open') RETURNING id`,
+      [name, formatText, cleanSize, limitTeams, startDate, prize, regFeeText, refFeeText]
     );
     const newTourneyId = ins.rows[0].id;
-
-    // Inscribir automáticamente a todos los clubes existentes (hasta el cupo máximo)
-    const teamsRes = await client.query('SELECT id FROM teams ORDER BY id ASC LIMIT $1', [limitTeams]);
-    for (const tm of teamsRes.rows) {
-      await client.query(
-        "INSERT INTO tournament_registrations (tournament_id, team_id, status) VALUES ($1, $2, 'approved') ON CONFLICT DO NOTHING",
-        [newTourneyId, tm.id]
-      );
-    }
     await client.query('COMMIT');
 
     const state = await broadcastState();
     res.status(201).json({
-      message: 'Torneo creado y publicado.',
+      message: 'Torneo creado y publicado sin equipos pre-inscritos.',
       tournamentId: 'tour-' + newTourneyId,
       state
     });
@@ -1177,25 +1221,10 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
       [tournamentId]
     );
 
-    // Si hay menos de 2 clubes inscritos, incluir todos los clubes existentes automáticamente
-    if (regRes.rows.length < 2) {
-      const allTeams = await client.query('SELECT id FROM teams ORDER BY id ASC LIMIT $1', [t.max_teams || 8]);
-      for (const tm of allTeams.rows) {
-        await client.query(
-          "INSERT INTO tournament_registrations (tournament_id, team_id, status) VALUES ($1, $2, 'approved') ON CONFLICT DO NOTHING",
-          [tournamentId, tm.id]
-        );
-      }
-      regRes = await client.query(
-        "SELECT team_id FROM tournament_registrations WHERE tournament_id = $1 AND status = 'approved' ORDER BY registered_at ASC",
-        [tournamentId]
-      );
-    }
-
     const list = regRes.rows.map((r) => r.team_id);
     if (list.length < 2) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Se necesitan al menos 2 clubes en el sistema para generar el calendario.' });
+      return res.status(400).json({ error: 'Debes seleccionar al menos 2 clubes participantes en este torneo antes de generar el calendario.' });
     }
 
     // Eliminar partidos programados previos de este torneo para regenerar limpio
@@ -1245,13 +1274,13 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
 app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('referee', 'admin'), async (req, res) => {
   try {
     const matchId = parseId(req.params.matchId);
-    const { status, minute, period, mvpPlayerId } = req.body;
+    const { status, minute, period, mvpPlayerId, tickOnly } = req.body;
 
     if (status && minute !== undefined) {
       await pool.query('UPDATE matches SET status = $1, current_minute = $2 WHERE id = $3', [status, minute, matchId]);
     } else if (status) {
       await pool.query(
-        'UPDATE matches SET status = $1, current_minute = CASE WHEN $1 = \'live\' AND current_minute = 0 THEN 1 ELSE current_minute END WHERE id = $2',
+        "UPDATE matches SET status = $1, current_minute = CASE WHEN $1 = 'live' AND current_minute = 0 THEN 1 ELSE current_minute END WHERE id = $2",
         [status, matchId]
       );
     } else if (minute !== undefined) {
@@ -1263,6 +1292,12 @@ app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('refere
     if (mvpPlayerId !== undefined) {
       const mvpIdNum = mvpPlayerId ? parseId(mvpPlayerId) : null;
       await pool.query('UPDATE matches SET mvp_player_id = $1 WHERE id = $2', [mvpIdNum, matchId]);
+    }
+
+    // Si es solo un avance automático del minutero sin cambio de estado, no recargar toda la base sino emitir evento ligero
+    if (tickOnly && !status && !period && mvpPlayerId === undefined) {
+      io.emit('live_clock_sync', { matchId: 'm-' + matchId, minute: minute || 0, seconds: 0 });
+      return res.json({ message: 'Minuto actualizado.' });
     }
 
     const state = await broadcastState();
@@ -1351,14 +1386,8 @@ app.post('/api/matches/:matchId/events', authenticateToken, authorizeRoles('refe
   }
 });
 
-// WebSockets para sincronizar el cronómetro en vivo y notificar nuevas versiones
+// WebSockets para sincronizar el cronómetro en vivo
 io.on('connection', (socket) => {
-  socket.emit('app_version_info', {
-    version: currentAppVersion,
-    notes: currentReleaseNotes,
-    targetRole: currentTargetRole
-  });
-
   socket.on('referee_clock_tick', (data) => {
     socket.broadcast.emit('live_clock_sync', data);
   });
