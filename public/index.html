@@ -830,9 +830,12 @@
                 if (ev.matchId === m.id) {
                     var pl = findPlayer(ev.playerId);
                     var tm = findTeam(ev.teamId);
+                    var gk = ev.concededPlayerId ? findPlayer(ev.concededPlayerId) : null;
                     var label = ev.type === 'goal' ? '⚽ GOL' : ev.type === 'yellow' ? '🟨 AMARILLA' : '🟥 ROJA';
                     evHtml += '<div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between text-xs">' +
-                        '<span><strong class="text-amber-400 font-mono">' + ev.minute + '\'</strong> ' + label + ' — <strong>' + (pl ? pl.name : 'Jugador') + '</strong></span>' +
+                        '<span><strong class="text-amber-400 font-mono">' + ev.minute + '\'</strong> ' + label + ' — <strong>' + (pl ? pl.name : 'Jugador') + '</strong>' +
+                            (ev.type === 'goal' && gk ? ' <span class="text-slate-400 text-[11px]">(Arco: 🧤 #' + gk.number + ' ' + gk.name + ')</span>' : '') +
+                        '</span>' +
                         '<span class="font-bold" style="color:' + tm.color + '">' + tm.shortName + '</span>' +
                     '</div>';
                 }
@@ -2949,6 +2952,29 @@
         // INTERFAZ 2: CONSOLA DEL ÁRBITRO (INICIAR/FINALIZAR, CRONÓMETRO, GOLES Y CALENDARIO)
         // =========================================================================
 
+        function getTeamDefaultGoalkeeper(teamId) {
+            var fallbackPor = null;
+            for (var i = 0; i < db.players.length; i++) {
+                var p = db.players[i];
+                if (p.teamId !== teamId) continue;
+                if (p.pos === 'POR' && p.starter) return p;
+                if (p.pos === 'POR' && !fallbackPor) fallbackPor = p;
+            }
+            return fallbackPor;
+        }
+
+        function refChangeActiveGk(matchId, side, playerId) {
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) {
+                    if (side === 'home') db.matches[i].homeGkId = playerId;
+                    else db.matches[i].awayGkId = playerId;
+                }
+            }
+            var gk = findPlayer(playerId);
+            saveDB();
+            if (gk) notify('🧤 Portero en arco actualizado: #' + gk.number + ' ' + gk.name);
+        }
+
         function renderRefereeDashboard() {
             var tMatches = [];
             for (var i = 0; i < db.matches.length; i++) {
@@ -2993,11 +3019,24 @@
                 var awayTeam = findTeam(activeMatch.awayId);
                 var homeOpts = '';
                 var awayOpts = '';
+                var homeGkOpts = '';
+                var awayGkOpts = '';
+
+                var defHomeGk = activeMatch.homeGkId ? findPlayer(activeMatch.homeGkId) : getTeamDefaultGoalkeeper(homeTeam.id);
+                var defAwayGk = activeMatch.awayGkId ? findPlayer(activeMatch.awayGkId) : getTeamDefaultGoalkeeper(awayTeam.id);
+                var selHomeGkId = defHomeGk ? defHomeGk.id : '';
+                var selAwayGkId = defAwayGk ? defAwayGk.id : '';
 
                 for (var pIdx = 0; pIdx < db.players.length; pIdx++) {
                     var pl = db.players[pIdx];
-                    if (pl.teamId === homeTeam.id) homeOpts += '<option value="' + pl.id + '">#' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
-                    if (pl.teamId === awayTeam.id) awayOpts += '<option value="' + pl.id + '">#' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
+                    if (pl.teamId === homeTeam.id) {
+                        homeOpts += '<option value="' + pl.id + '">#' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
+                        homeGkOpts += '<option value="' + pl.id + '" ' + (pl.id === selHomeGkId ? 'selected' : '') + '>🧤 #' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
+                    }
+                    if (pl.teamId === awayTeam.id) {
+                        awayOpts += '<option value="' + pl.id + '">#' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
+                        awayGkOpts += '<option value="' + pl.id + '" ' + (pl.id === selAwayGkId ? 'selected' : '') + '>🧤 #' + pl.number + ' ' + pl.name + ' (' + pl.pos + ')</option>';
+                    }
                 }
 
                 var clockText = String(activeMatch.minute || 0).padStart(2, '0') + ':' + String(timerSeconds).padStart(2, '0');
@@ -3059,7 +3098,16 @@
                                 '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
                                     '<div class="p-3.5 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-2.5">' +
                                         '<div class="text-xs font-black text-emerald-400 uppercase">' + homeTeam.name + '</div>' +
-                                        '<select id="ref-home-pl" class="fallback-input">' + homeOpts + '</select>' +
+                                        '<div>' +
+                                            '<label class="block text-[10px] font-mono uppercase text-slate-400 mb-1">🧤 Portero en Arco (' + homeTeam.shortName + '):</label>' +
+                                            '<select id="ref-home-gk" onchange="refChangeActiveGk(\'' + activeMatch.id + '\', \'home\', this.value)" class="fallback-input" style="padding:7px 10px; font-size:12px;">' +
+                                                (homeGkOpts || '<option value="">Sin jugadores registrados</option>') +
+                                            '</select>' +
+                                        '</div>' +
+                                        '<div>' +
+                                            '<label class="block text-[10px] font-mono uppercase text-slate-400 mb-1">⚽ Jugador para Gol / Tarjeta:</label>' +
+                                            '<select id="ref-home-pl" class="fallback-input">' + homeOpts + '</select>' +
+                                        '</div>' +
                                         '<div class="grid grid-cols-3 gap-1.5">' +
                                             '<button onclick="refAddEvent(\'' + activeMatch.id + '\', \'' + homeTeam.id + '\', \'home\', \'goal\')" class="py-2 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs border-0 cursor-pointer">⚽ Gol</button>' +
                                             '<button onclick="refAddEvent(\'' + activeMatch.id + '\', \'' + homeTeam.id + '\', \'home\', \'yellow\')" class="py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold text-xs cursor-pointer">🟨 Amarilla</button>' +
@@ -3069,7 +3117,16 @@
 
                                     '<div class="p-3.5 rounded-2xl bg-slate-900 border border-cyan-500/30 space-y-2.5">' +
                                         '<div class="text-xs font-black text-cyan-400 uppercase">' + awayTeam.name + '</div>' +
-                                        '<select id="ref-away-pl" class="fallback-input">' + awayOpts + '</select>' +
+                                        '<div>' +
+                                            '<label class="block text-[10px] font-mono uppercase text-slate-400 mb-1">🧤 Portero en Arco (' + awayTeam.shortName + '):</label>' +
+                                            '<select id="ref-away-gk" onchange="refChangeActiveGk(\'' + activeMatch.id + '\', \'away\', this.value)" class="fallback-input" style="padding:7px 10px; font-size:12px;">' +
+                                                (awayGkOpts || '<option value="">Sin jugadores registrados</option>') +
+                                            '</select>' +
+                                        '</div>' +
+                                        '<div>' +
+                                            '<label class="block text-[10px] font-mono uppercase text-slate-400 mb-1">⚽ Jugador para Gol / Tarjeta:</label>' +
+                                            '<select id="ref-away-pl" class="fallback-input">' + awayOpts + '</select>' +
+                                        '</div>' +
                                         '<div class="grid grid-cols-3 gap-1.5">' +
                                             '<button onclick="refAddEvent(\'' + activeMatch.id + '\', \'' + awayTeam.id + '\', \'away\', \'goal\')" class="py-2 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs border-0 cursor-pointer">⚽ Gol</button>' +
                                             '<button onclick="refAddEvent(\'' + activeMatch.id + '\', \'' + awayTeam.id + '\', \'away\', \'yellow\')" class="py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold text-xs cursor-pointer">🟨 Amarilla</button>' +
@@ -3271,9 +3328,20 @@
             }
             if (!match) return;
 
+            var concededPlayerId = null;
             if (type === 'goal') {
                 if (side === 'home') match.homeScore++;
                 else match.awayScore++;
+
+                var oppSide = (side === 'home') ? 'away' : 'home';
+                var oppTeamId = (side === 'home') ? match.awayId : match.homeId;
+                var oppGkSelect = document.getElementById('ref-' + oppSide + '-gk');
+                if (oppGkSelect && oppGkSelect.value) {
+                    concededPlayerId = oppGkSelect.value;
+                } else {
+                    var defGk = getTeamDefaultGoalkeeper(oppTeamId);
+                    if (defGk) concededPlayerId = defGk.id;
+                }
             }
 
             db.events.push({
@@ -3281,21 +3349,24 @@
                 matchId: matchId,
                 teamId: teamId,
                 playerId: playerId,
+                concededPlayerId: concededPlayerId,
                 type: type,
                 minute: match.minute || 1
             });
 
             var pl = findPlayer(playerId);
+            var gkPl = concededPlayerId ? findPlayer(concededPlayerId) : null;
             saveDB();
             renderViewport();
             apiRequest('POST', '/api/matches/' + matchId + '/events', {
                 teamId: teamId,
                 playerId: playerId,
+                concededPlayerId: concededPlayerId,
                 eventType: type,
                 minute: match.minute || 1,
                 period: match.period || '1T'
             });
-            notify('✅ Registrado: ' + type.toUpperCase() + ' de ' + (pl ? pl.name : 'Jugador'));
+            notify('✅ Registrado: ' + type.toUpperCase() + ' de ' + (pl ? pl.name : 'Jugador') + (gkPl ? (' (Arco: 🧤 ' + gkPl.name + ')') : ''));
         }
 
         function openRefereeMatchRosterModal(matchId) {
@@ -4304,30 +4375,67 @@
         // =========================================================================
 
         function renderTournamentStatsGridHtml(tourneyId) {
+            var tourney = findTournament(tourneyId);
             var tourneyMatchIds = {};
             var mvpCounts = {};
+            var teamPjMap = {};
+            var teamCleanSheetsMap = {};
+            var teamGoalsAgainstFallback = {};
+
             for (var m = 0; m < db.matches.length; m++) {
-                if (db.matches[m].tournamentId === tourneyId) {
-                    tourneyMatchIds[db.matches[m].id] = true;
-                    var mvpId = db.matches[m].mvpPlayerId;
+                var matchObj = db.matches[m];
+                if (matchObj.tournamentId === tourneyId) {
+                    tourneyMatchIds[matchObj.id] = matchObj;
+                    var mvpId = matchObj.mvpPlayerId;
                     if (mvpId) mvpCounts[mvpId] = (mvpCounts[mvpId] || 0) + 1;
+
+                    if (matchObj.status === 'finished' || matchObj.status === 'live') {
+                        teamPjMap[matchObj.homeId] = (teamPjMap[matchObj.homeId] || 0) + 1;
+                        teamPjMap[matchObj.awayId] = (teamPjMap[matchObj.awayId] || 0) + 1;
+                        teamGoalsAgainstFallback[matchObj.homeId] = (teamGoalsAgainstFallback[matchObj.homeId] || 0) + (matchObj.awayScore || 0);
+                        teamGoalsAgainstFallback[matchObj.awayId] = (teamGoalsAgainstFallback[matchObj.awayId] || 0) + (matchObj.homeScore || 0);
+                        if (matchObj.status === 'finished') {
+                            if ((matchObj.awayScore || 0) === 0) teamCleanSheetsMap[matchObj.homeId] = (teamCleanSheetsMap[matchObj.homeId] || 0) + 1;
+                            if ((matchObj.homeScore || 0) === 0) teamCleanSheetsMap[matchObj.awayId] = (teamCleanSheetsMap[matchObj.awayId] || 0) + 1;
+                        }
+                    }
                 }
             }
 
             var goalsMap = {};
             var yellowMap = {};
             var redMap = {};
+            var gkConcededMap = {};
 
             for (var e = 0; e < db.events.length; e++) {
                 var ev = db.events[e];
-                if (!tourneyMatchIds[ev.matchId]) continue;
-                if (ev.type === 'goal') goalsMap[ev.playerId] = (goalsMap[ev.playerId] || 0) + 1;
+                var mRef = tourneyMatchIds[ev.matchId];
+                if (!mRef) continue;
+                if (ev.type === 'goal') {
+                    goalsMap[ev.playerId] = (goalsMap[ev.playerId] || 0) + 1;
+                    var gkId = ev.concededPlayerId;
+                    if (!gkId) {
+                        var oppTid = (mRef.homeId === ev.teamId) ? mRef.awayId : mRef.homeId;
+                        var defPor = getTeamDefaultGoalkeeper(oppTid);
+                        if (defPor) gkId = defPor.id;
+                    }
+                    if (gkId) {
+                        gkConcededMap[gkId] = (gkConcededMap[gkId] || 0) + 1;
+                    }
+                }
                 if (ev.type === 'yellow') yellowMap[ev.playerId] = (yellowMap[ev.playerId] || 0) + 1;
                 if (ev.type === 'red') redMap[ev.playerId] = (redMap[ev.playerId] || 0) + 1;
             }
 
             var scorers = [];
             var cardsList = [];
+            var goalkeepersList = [];
+            var enrolledTeamMap = {};
+            if (tourney && tourney.teamIds) {
+                for (var tIdx = 0; tIdx < tourney.teamIds.length; tIdx++) {
+                    enrolledTeamMap[tourney.teamIds[tIdx]] = true;
+                }
+            }
 
             for (var i = 0; i < db.players.length; i++) {
                 var p = db.players[i];
@@ -4342,11 +4450,32 @@
                 if (y > 0 || r > 0 || p.status === 'Suspendido') {
                     cardsList.push({ player: p, yellows: y, reds: r });
                 }
+                if ((p.pos === 'POR' && (!tourney || enrolledTeamMap[p.teamId])) || gkConcededMap[p.id] !== undefined) {
+                    var concededCount = gkConcededMap[p.id] !== undefined ? gkConcededMap[p.id] : 0;
+                    var pjCount = teamPjMap[p.teamId] || 0;
+                    var cleanSheets = teamCleanSheetsMap[p.teamId] || 0;
+                    goalkeepersList.push({
+                        player: p,
+                        pj: pjCount,
+                        conceded: concededCount,
+                        cleanSheets: cleanSheets
+                    });
+                }
             }
 
             scorers.sort(function(a, b) {
                 if (b.goals !== a.goals) return b.goals - a.goals;
                 return b.mvp - a.mvp;
+            });
+
+            // Orden Guante de Oro: primero porteros con partidos jugados, menos goles recibidos y más vallas invictas
+            goalkeepersList.sort(function(a, b) {
+                var aPlayed = a.pj > 0 ? 1 : 0;
+                var bPlayed = b.pj > 0 ? 1 : 0;
+                if (bPlayed !== aPlayed) return bPlayed - aPlayed;
+                if (a.conceded !== b.conceded) return a.conceded - b.conceded;
+                if (b.cleanSheets !== a.cleanSheets) return b.cleanSheets - a.cleanSheets;
+                return b.pj - a.pj;
             });
 
             cardsList.sort(function(a, b) {
@@ -4370,6 +4499,29 @@
                     '<div class="flex items-center gap-2">' +
                         (sc.mvp > 0 ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">⭐ ' + sc.mvp + ' MVP</span>' : '') +
                         '<span class="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-mono font-black text-xs">' + sc.goals + ' ⚽</span>' +
+                    '</div>' +
+                '</div>';
+            }
+
+            var gkRows = '';
+            for (var gIdx = 0; gIdx < goalkeepersList.length; gIdx++) {
+                var gkItem = goalkeepersList[gIdx];
+                var gkClub = findTeam(gkItem.player.teamId);
+                var isLeader = (gIdx === 0 && gkItem.pj > 0);
+                gkRows += '<div class="p-2.5 rounded-xl bg-slate-900 border ' + (isLeader ? 'border-amber-500/50' : 'border-slate-800') + ' flex items-center justify-between gap-2 text-xs">' +
+                    '<div class="flex items-center gap-2.5">' +
+                        '<span class="font-mono font-black ' + (isLeader ? 'text-amber-400' : 'text-cyan-400') + ' w-5">' + (gIdx + 1) + '°</span>' +
+                        '<img src="' + getPlayerAvatarUrl(gkItem.player, gkClub) + '" class="w-8 h-8 rounded-full object-cover border border-slate-700" alt="">' +
+                        '<div>' +
+                            '<strong class="text-white block">' + gkItem.player.name + ' <span class="font-mono text-cyan-400">#' + gkItem.player.number + '</span></strong>' +
+                            '<span class="text-[10px] text-slate-400">' + gkClub.name + ' • PJ: ' + gkItem.pj + '</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="flex flex-wrap items-center justify-end gap-1.5">' +
+                        (gkItem.cleanSheets > 0 ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[10px]" title="Partidos con arco en cero">🛡️ ' + gkItem.cleanSheets + ' Valla(s) 0</span>' : '') +
+                        '<span class="px-2.5 py-1 rounded-lg ' + (gkItem.conceded === 0 && gkItem.pj > 0 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-cyan-500/20 text-cyan-300') + ' font-mono font-black text-xs">' +
+                            '🥅 ' + gkItem.conceded + ' Gol(es) Rec.' +
+                        '</span>' +
                     '</div>' +
                 '</div>';
             }
@@ -4400,10 +4552,14 @@
                 '</div>';
             }
 
-            return '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">' +
+            return '<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">' +
                 '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
                     '<h3 class="text-base font-black text-white m-0">👟 Tabla de Goleadores & MVP (Bota de Oro)</h3>' +
                     '<div class="space-y-2">' + (scorerRows || '<div class="text-xs text-slate-400">Sin goles registrados en este torneo.</div>') + '</div>' +
+                '</div>' +
+                '<div class="glass-panel p-5 border border-cyan-500/30 space-y-3">' +
+                    '<h3 class="text-base font-black text-white m-0">🧤 Guante de Oro (Porteros & Goles Recibidos)</h3>' +
+                    '<div class="space-y-2">' + (gkRows || '<div class="text-xs text-slate-400">Sin porteros registrados todavía en este torneo.</div>') + '</div>' +
                 '</div>' +
                 '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
                     '<h3 class="text-base font-black text-white m-0">⚖️ Tribunal Disciplinario (Tarjetas y Suspendidos)</h3>' +

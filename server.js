@@ -123,6 +123,8 @@ async function initDatabase() {
       await client.query(`ALTER TABLE players ALTER COLUMN coord_y DROP DEFAULT`);
       await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
+      await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS goals_conceded INTEGER DEFAULT 0`);
+      await client.query(`ALTER TABLE match_events ADD COLUMN IF NOT EXISTS conceded_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
 
       await client.query('BEGIN');
       // Si existían los equipos de prueba de la versión demo previa, limpiarlos automáticamente para dejar la base oficial en limpio
@@ -287,6 +289,7 @@ async function getFullState(clientOrPool = pool) {
       matchId: 'm-' + ev.match_id,
       teamId: 'team-' + ev.team_id,
       playerId: 'p-' + ev.player_id,
+      concededPlayerId: ev.conceded_player_id ? 'p-' + ev.conceded_player_id : null,
       type: ev.event_type,
       minute: ev.minute
     }))
@@ -1229,6 +1232,7 @@ app.post('/api/matches/:matchId/events', authenticateToken, authorizeRoles('refe
     const teamId = parseId(req.body.teamId);
     const playerId = parseId(req.body.playerId);
     const assistPlayerId = req.body.assistPlayerId ? parseId(req.body.assistPlayerId) : null;
+    let concededPlayerId = req.body.concededPlayerId ? parseId(req.body.concededPlayerId) : null;
     const { eventType, minute, period } = req.body;
 
     await client.query('BEGIN');
@@ -1240,22 +1244,40 @@ app.post('/api/matches/:matchId/events', authenticateToken, authorizeRoles('refe
       return res.status(400).json({ error: 'Jugador inhabilitado por sanción disciplinaria.' });
     }
 
+    // Si es un gol y no se envió explícitamente el portero rival, detectar el portero titular del equipo contrario
+    let isHome = false;
+    if (eventType === 'goal') {
+      const mRes = await client.query('SELECT home_team_id, away_team_id FROM matches WHERE id = $1', [matchId]);
+      if (mRes.rows.length > 0) {
+        isHome = mRes.rows[0].home_team_id === Number(teamId);
+        const oppTeamId = isHome ? mRes.rows[0].away_team_id : mRes.rows[0].home_team_id;
+        if (!concededPlayerId && oppTeamId) {
+          const gkRes = await client.query(
+            "SELECT id FROM players WHERE team_id = $1 AND position = 'POR' ORDER BY is_starter DESC, sort_order ASC, id ASC LIMIT 1",
+            [oppTeamId]
+          );
+          if (gkRes.rows.length > 0) concededPlayerId = gkRes.rows[0].id;
+        }
+      }
+    }
+
     // Insertar evento
     await client.query(
-      `INSERT INTO match_events (match_id, team_id, player_id, assist_player_id, event_type, minute, period)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [matchId, teamId, playerId, assistPlayerId, eventType, minute || 1, period || '1T']
+      `INSERT INTO match_events (match_id, team_id, player_id, assist_player_id, conceded_player_id, event_type, minute, period)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [matchId, teamId, playerId, assistPlayerId, concededPlayerId, eventType, minute || 1, period || '1T']
     );
 
     // Actualizar marcador y estadísticas según el tipo de evento
     if (eventType === 'goal') {
-      const mRes = await client.query('SELECT home_team_id FROM matches WHERE id = $1', [matchId]);
-      const isHome = mRes.rows[0].home_team_id === Number(teamId);
       await client.query(
         `UPDATE matches SET ${isHome ? 'home_score = home_score + 1' : 'away_score = away_score + 1'}, current_minute = $1 WHERE id = $2`,
         [minute || 1, matchId]
       );
       await client.query('UPDATE players SET goals = goals + 1 WHERE id = $1', [playerId]);
+      if (concededPlayerId) {
+        await client.query('UPDATE players SET goals_conceded = COALESCE(goals_conceded, 0) + 1 WHERE id = $1', [concededPlayerId]);
+      }
       if (assistPlayerId) {
         await client.query('UPDATE players SET assists = assists + 1 WHERE id = $1', [assistPlayerId]);
       }
