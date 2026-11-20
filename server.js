@@ -125,6 +125,13 @@ async function initDatabase() {
       await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS registration_fee VARCHAR(50) DEFAULT '$150 USD'`);
       await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS referee_fee VARCHAR(50) DEFAULT '$20 USD'`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
+      await client.query(`ALTER TABLE matches DROP CONSTRAINT IF EXISTS matches_status_check`);
+      await client.query(`ALTER TABLE matches ADD CONSTRAINT matches_status_check CHECK (status IN ('scheduled', 'live', 'finished', 'suspended'))`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS suspension_reason TEXT`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS forfeit_winner_id INTEGER REFERENCES teams(id) ON DELETE SET NULL`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_penalties INTEGER DEFAULT NULL`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_penalties INTEGER DEFAULT NULL`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS penalties_log TEXT`);
       await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS goals_conceded INTEGER DEFAULT 0`);
       await client.query(`ALTER TABLE match_events ADD COLUMN IF NOT EXISTS conceded_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
 
@@ -291,21 +298,36 @@ async function getFullState(clientOrPool = pool) {
       hasReceiptDoc: Boolean(py.has_receipt_doc),
       status: py.status || 'pending'
     })),
-    matches: matchesRes.rows.map((m) => ({
-      id: 'm-' + m.id,
-      tournamentId: 'tour-' + m.tournament_id,
-      round: m.round_name,
-      homeId: 'team-' + m.home_team_id,
-      awayId: 'team-' + m.away_team_id,
-      homeScore: m.home_score,
-      awayScore: m.away_score,
-      status: m.status,
-      period: m.period || '1T',
-      minute: m.current_minute || 0,
-      date: m.match_date,
-      pitch: m.pitch_name,
-      mvpPlayerId: m.mvp_player_id ? 'p-' + m.mvp_player_id : null
-    })),
+    matches: matchesRes.rows.map((m) => {
+      let parsedPenLog = [];
+      if (m.penalties_log) {
+        try {
+          parsedPenLog = JSON.parse(m.penalties_log);
+        } catch (e) {
+          parsedPenLog = [];
+        }
+      }
+      return {
+        id: 'm-' + m.id,
+        tournamentId: 'tour-' + m.tournament_id,
+        round: m.round_name,
+        homeId: 'team-' + m.home_team_id,
+        awayId: 'team-' + m.away_team_id,
+        homeScore: m.home_score,
+        awayScore: m.away_score,
+        status: m.status,
+        period: m.period || '1T',
+        minute: m.current_minute || 0,
+        date: m.match_date,
+        pitch: m.pitch_name,
+        mvpPlayerId: m.mvp_player_id ? 'p-' + m.mvp_player_id : null,
+        suspensionReason: m.suspension_reason || null,
+        forfeitWinnerId: m.forfeit_winner_id ? 'team-' + m.forfeit_winner_id : null,
+        homePenalties: m.home_penalties !== null && m.home_penalties !== undefined ? Number(m.home_penalties) : null,
+        awayPenalties: m.away_penalties !== null && m.away_penalties !== undefined ? Number(m.away_penalties) : null,
+        penaltiesLog: Array.isArray(parsedPenLog) ? parsedPenLog : []
+      };
+    }),
     events: eventsRes.rows.map((ev) => ({
       id: 'ev-' + ev.id,
       matchId: 'm-' + ev.match_id,
@@ -1120,14 +1142,16 @@ app.delete('/api/tournaments/:tournamentId', authenticateToken, authorizeRoles('
 app.put('/api/matches/:matchId/schedule', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   try {
     const matchId = parseId(req.params.matchId);
-    const { round, date, pitch } = req.body;
+    const { round, date, pitch, reactivateIfSuspended } = req.body;
     await pool.query(
       `UPDATE matches SET
         round_name = COALESCE($1, round_name),
         match_date = COALESCE($2, match_date),
-        pitch_name = COALESCE($3, pitch_name)
+        pitch_name = COALESCE($3, pitch_name),
+        status = CASE WHEN $5 = TRUE AND status = 'suspended' THEN 'scheduled' ELSE status END,
+        suspension_reason = CASE WHEN $5 = TRUE AND status = 'suspended' THEN NULL ELSE suspension_reason END
        WHERE id = $4`,
-      [round || null, date || null, pitch || null, matchId]
+      [round || null, date || null, pitch || null, matchId, reactivateIfSuspended !== false]
     );
     const state = await broadcastState();
     res.json({ message: 'Horario y cancha del partido actualizados.', state });
@@ -1236,8 +1260,11 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
     const timeSlots = ['19:00', '20:15', '21:30', '22:30'];
     let created = 0;
 
+    // PRIMERA VUELTA (IDA)
+    const firstLegRounds = [];
     for (let r = 0; r < rounds; r++) {
       let slotIdx = 0;
+      const roundMatches = [];
       for (let i = 0; i < half; i++) {
         const h = list[i];
         const a = list[list.length - 1 - i];
@@ -1246,15 +1273,31 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
           const matchHour = timeSlots[slotIdx % timeSlots.length];
           const pitchNum = (slotIdx % 2) + 1;
           slotIdx++;
+          roundMatches.push({ h, a, matchHour, pitchNum });
           await client.query(
             `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
              VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0)`,
-            [tournamentId, `Jornada ${r + 1}`, `${t.start_date} • ${matchHour}`, `Cancha ${pitchNum} (${t.pitch_size})`, h, a]
+            [tournamentId, `Jornada ${r + 1} (Ida)`, `${t.start_date} • ${matchHour}`, `Cancha ${pitchNum} (${t.pitch_size})`, h, a]
           );
         }
       }
+      firstLegRounds.push(roundMatches);
       list.splice(1, 0, list.pop());
     }
+
+    // SEGUNDA VUELTA (VUELTA — Localía invertida)
+    for (let r = 0; r < firstLegRounds.length; r++) {
+      const roundMatches = firstLegRounds[r];
+      for (const rm of roundMatches) {
+        created++;
+        await client.query(
+          `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
+           VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0)`,
+          [tournamentId, `Jornada ${rounds + r + 1} (Vuelta)`, `${t.start_date} • ${rm.matchHour}`, `Cancha ${rm.pitchNum} (${t.pitch_size})`, rm.a, rm.h]
+        );
+      }
+    }
+
     await client.query("UPDATE tournaments SET status = 'active' WHERE id = $1", [tournamentId]);
     await client.query('COMMIT');
 
@@ -1271,18 +1314,85 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
 // ==========================================
 // 4. CONSOLA ÁRBITRO Y TIEMPO REAL (SOCKET.IO)
 // ==========================================
+async function autoAdvanceFinalIfReady(clientOrPool, matchId) {
+  const mRes = await clientOrPool.query('SELECT * FROM matches WHERE id = $1', [matchId]);
+  if (mRes.rows.length === 0) return;
+  const currentMatch = mRes.rows[0];
+  if (currentMatch.round_name !== 'Semifinal 1' && currentMatch.round_name !== 'Semifinal 2') return;
+
+  const tourneyId = currentMatch.tournament_id;
+  const semisRes = await clientOrPool.query(
+    "SELECT * FROM matches WHERE tournament_id = $1 AND round_name IN ('Semifinal 1', 'Semifinal 2') ORDER BY id ASC",
+    [tourneyId]
+  );
+  let sf1 = null;
+  let sf2 = null;
+  for (const r of semisRes.rows) {
+    if (r.round_name === 'Semifinal 1') sf1 = r;
+    if (r.round_name === 'Semifinal 2') sf2 = r;
+  }
+  if (!sf1 || !sf2 || sf1.status !== 'finished' || sf2.status !== 'finished') return;
+
+  function resolveMatchWinnerId(mRow) {
+    if (mRow.forfeit_winner_id) return mRow.forfeit_winner_id;
+    if (mRow.home_score > mRow.away_score) return mRow.home_team_id;
+    if (mRow.away_score > mRow.home_score) return mRow.away_team_id;
+    if (mRow.home_penalties !== null && mRow.away_penalties !== null && mRow.home_penalties !== mRow.away_penalties) {
+      return mRow.home_penalties > mRow.away_penalties ? mRow.home_team_id : mRow.away_team_id;
+    }
+    return mRow.home_team_id;
+  }
+
+  const finalistA = resolveMatchWinnerId(sf1);
+  const finalistB = resolveMatchWinnerId(sf2);
+  if (!finalistA || !finalistB) return;
+
+  const tRes = await clientOrPool.query('SELECT pitch_size FROM tournaments WHERE id = $1', [tourneyId]);
+  const pitchSize = tRes.rows[0]?.pitch_size || '7v7';
+
+  const existingFinal = await clientOrPool.query(
+    "SELECT id, status FROM matches WHERE tournament_id = $1 AND round_name = '🏆 GRAN FINAL' ORDER BY id DESC LIMIT 1",
+    [tourneyId]
+  );
+
+  if (existingFinal.rows.length > 0) {
+    if (existingFinal.rows[0].status === 'scheduled') {
+      await clientOrPool.query(
+        'UPDATE matches SET home_team_id = $1, away_team_id = $2 WHERE id = $3',
+        [finalistA, finalistB, existingFinal.rows[0].id]
+      );
+    }
+  } else {
+    await clientOrPool.query(
+      `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
+       VALUES ($1, '🏆 GRAN FINAL', 'Gran Final • 21:00', $2, $3, $4, 0, 0, 'scheduled', '1T', 0)`,
+      [tourneyId, `Estadio Principal (${pitchSize})`, finalistA, finalistB]
+    );
+  }
+}
+
 app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('referee', 'admin'), async (req, res) => {
   try {
     const matchId = parseId(req.params.matchId);
-    const { status, minute, period, mvpPlayerId, tickOnly } = req.body;
+    const {
+      status,
+      minute,
+      period,
+      mvpPlayerId,
+      tickOnly,
+      suspensionReason,
+      forfeitWinnerId,
+      homeScore,
+      awayScore,
+      homePenalties,
+      awayPenalties,
+      penaltiesLog
+    } = req.body;
 
     if (status && minute !== undefined) {
       await pool.query('UPDATE matches SET status = $1, current_minute = $2 WHERE id = $3', [status, minute, matchId]);
     } else if (status) {
-      await pool.query(
-        "UPDATE matches SET status = $1, current_minute = CASE WHEN $1 = 'live' AND current_minute = 0 THEN 1 ELSE current_minute END WHERE id = $2",
-        [status, matchId]
-      );
+      await pool.query('UPDATE matches SET status = $1 WHERE id = $2', [status, matchId]);
     } else if (minute !== undefined) {
       await pool.query('UPDATE matches SET current_minute = $1 WHERE id = $2', [minute, matchId]);
     }
@@ -1293,9 +1403,40 @@ app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('refere
       const mvpIdNum = mvpPlayerId ? parseId(mvpPlayerId) : null;
       await pool.query('UPDATE matches SET mvp_player_id = $1 WHERE id = $2', [mvpIdNum, matchId]);
     }
+    if (suspensionReason !== undefined) {
+      await pool.query('UPDATE matches SET suspension_reason = $1 WHERE id = $2', [suspensionReason || null, matchId]);
+    }
+    if (forfeitWinnerId !== undefined) {
+      const ffIdNum = forfeitWinnerId ? parseId(forfeitWinnerId) : null;
+      await pool.query('UPDATE matches SET forfeit_winner_id = $1 WHERE id = $2', [ffIdNum, matchId]);
+    }
+    if (homeScore !== undefined && awayScore !== undefined) {
+      await pool.query('UPDATE matches SET home_score = $1, away_score = $2 WHERE id = $3', [Number(homeScore) || 0, Number(awayScore) || 0, matchId]);
+    }
+    if (homePenalties !== undefined || awayPenalties !== undefined || penaltiesLog !== undefined) {
+      const hPen = homePenalties === null || homePenalties === undefined ? null : Number(homePenalties);
+      const aPen = awayPenalties === null || awayPenalties === undefined ? null : Number(awayPenalties);
+      const pLogStr = Array.isArray(penaltiesLog) ? JSON.stringify(penaltiesLog) : (penaltiesLog || null);
+      await pool.query(
+        'UPDATE matches SET home_penalties = $1, away_penalties = $2, penalties_log = $3 WHERE id = $4',
+        [hPen, aPen, pLogStr, matchId]
+      );
+    }
+
+    if (status === 'finished') {
+      await autoAdvanceFinalIfReady(pool, matchId);
+    }
 
     // Si es solo un avance automático del minutero sin cambio de estado, no recargar toda la base sino emitir evento ligero
-    if (tickOnly && !status && !period && mvpPlayerId === undefined) {
+    if (
+      tickOnly &&
+      !status &&
+      !period &&
+      mvpPlayerId === undefined &&
+      suspensionReason === undefined &&
+      forfeitWinnerId === undefined &&
+      homePenalties === undefined
+    ) {
       io.emit('live_clock_sync', { matchId: 'm-' + matchId, minute: minute || 0, seconds: 0 });
       return res.json({ message: 'Minuto actualizado.' });
     }

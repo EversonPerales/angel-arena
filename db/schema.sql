@@ -111,10 +111,15 @@ CREATE TABLE IF NOT EXISTS matches (
     away_team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     home_score INTEGER DEFAULT 0,
     away_score INTEGER DEFAULT 0,
-    status VARCHAR(20) DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'live', 'finished')),
+    status VARCHAR(20) DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'live', 'finished', 'suspended')),
     period VARCHAR(10) DEFAULT '1T',
     current_minute INTEGER DEFAULT 0,
-    mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL
+    mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+    suspension_reason TEXT,
+    forfeit_winner_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+    home_penalties INTEGER DEFAULT NULL,
+    away_penalties INTEGER DEFAULT NULL,
+    penalties_log TEXT
 );
 
 -- 8. Eventos del Partido (Goles, Asistencias, Tarjetas, Cambios)

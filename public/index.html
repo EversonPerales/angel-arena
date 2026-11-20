@@ -561,16 +561,23 @@
                 for (var j = 0; j < db.matches.length; j++) {
                     var m = db.matches[j];
                     if (m.tournamentId === t.id && (m.status === 'finished' || m.status === 'live')) {
+                        // Las fases eliminatorias (Semifinales y Gran Final) no alteran los puntos de la fase regular
+                        if (m.round === 'Semifinal 1' || m.round === 'Semifinal 2' || m.round === '🏆 GRAN FINAL') {
+                            continue;
+                        }
                         if (m.homeId === tid || m.awayId === tid) {
                             pj++;
                             var isHome = (m.homeId === tid);
-                            var sFor = isHome ? m.homeScore : m.awayScore;
-                            var sAgainst = isHome ? m.awayScore : m.homeScore;
+                            var sFor = isHome ? (m.homeScore || 0) : (m.awayScore || 0);
+                            var sAgainst = isHome ? (m.awayScore || 0) : (m.homeScore || 0);
                             gf += sFor;
                             gc += sAgainst;
                             if (sFor > sAgainst) pg++;
                             else if (sFor < sAgainst) pp++;
-                            else pe++;
+                            else {
+                                // Si hubo definición por penales en fase regular, o empate normal
+                                pe++;
+                            }
                         }
                     }
                 }
@@ -910,6 +917,35 @@
             renderViewport();
         }
 
+        function renderMatchStatusBadgeHtml(m) {
+            if (m.status === 'live') {
+                return '<span class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">🔴 EN VIVO ' + String(m.minute || 0).padStart(2, '0') + '\'</span>';
+            }
+            if (m.status === 'suspended') {
+                return '<span class="px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">🌧️ SUSPENDIDO / REPROGRAMAR</span>';
+            }
+            if (m.status === 'finished') {
+                if (m.forfeitWinnerId) {
+                    var ffTeam = findTeam(m.forfeitWinnerId);
+                    return '<span class="px-2 py-0.5 rounded font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">🏳️ FORFEIT (' + ffTeam.shortName + ')</span>';
+                }
+                if (m.homePenalties !== null && m.homePenalties !== undefined && m.awayPenalties !== null && m.awayPenalties !== undefined) {
+                    return '<span class="px-2 py-0.5 rounded font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">🎯 FINAL PEN. (' + m.homePenalties + '-' + m.awayPenalties + ')</span>';
+                }
+                return '<span class="px-2 py-0.5 rounded font-bold bg-slate-800 text-slate-300">FINALIZADO</span>';
+            }
+            return '<span class="px-2 py-0.5 rounded font-bold bg-amber-500/20 text-amber-300">PROGRAMADO</span>';
+        }
+
+        function renderMatchScoreTextHtml(m) {
+            if (m.status === 'scheduled') return 'VS';
+            var scoreText = (m.homeScore || 0) + ' : ' + (m.awayScore || 0);
+            if (m.homePenalties !== null && m.homePenalties !== undefined && m.awayPenalties !== null && m.awayPenalties !== undefined) {
+                scoreText += ' <span class="text-xs font-mono text-purple-300">(' + m.homePenalties + '-' + m.awayPenalties + ' PEN)</span>';
+            }
+            return scoreText;
+        }
+
         function openMatchReportModal(matchId) {
             var m = null;
             for (var i = 0; i < db.matches.length; i++) {
@@ -940,6 +976,47 @@
                 evHtml = '<div class="p-4 rounded-xl bg-slate-900/60 text-center text-xs text-slate-400">Sin incidencias registradas en este partido.</div>';
             }
 
+            var specialNoticeHtml = '';
+            if (m.status === 'suspended') {
+                specialNoticeHtml = '<div class="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs space-y-1">' +
+                    '<div class="font-black text-rose-300 uppercase">🌧️ Partido Suspendido por el Árbitro (Pendiente de Reprogramación)</div>' +
+                    '<div class="text-slate-200">Motivo oficial en acta: <strong>' + (m.suspensionReason || 'Lluvia / Fuerza mayor') + '</strong></div>' +
+                    ((db.currentUser && db.currentUser.role === 'admin')
+                        ? '<div class="pt-1.5"><button onclick="closeGlobalModal(); openEditMatchScheduleModal(\'' + m.id + '\')" class="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-black text-xs border-0 cursor-pointer">📅 Reprogramar Fecha y Hora Ahora</button></div>'
+                        : '<div class="text-[11px] text-amber-300">El Organizador asignará la nueva fecha y hora del encuentro.</div>') +
+                '</div>';
+            } else if (m.forfeitWinnerId) {
+                var winClub = findTeam(m.forfeitWinnerId);
+                var loseClub = (m.forfeitWinnerId === home.id) ? away : home;
+                specialNoticeHtml = '<div class="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-xs space-y-1">' +
+                    '<div class="font-black text-amber-300 uppercase">🏳️ Victoria Oficial por Forfeit (Inasistencia)</div>' +
+                    '<div class="text-slate-200">Ganador por Forfeit: <strong class="text-emerald-400">' + winClub.name + ' (3 - 0)</strong> por inasistencia de <strong>' + loseClub.name + '</strong>. (No suma goles individuales ni goles recibidos a porteros).</div>' +
+                '</div>';
+            }
+
+            var penReportHtml = '';
+            if (m.homePenalties !== null && m.homePenalties !== undefined && m.awayPenalties !== null && m.awayPenalties !== undefined) {
+                var penLogRows = '';
+                var pLog = Array.isArray(m.penaltiesLog) ? m.penaltiesLog : [];
+                for (var pIdx = 0; pIdx < pLog.length; pIdx++) {
+                    var pk = pLog[pIdx];
+                    var pkTeam = findTeam(pk.teamId);
+                    penLogRows += '<div class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-[11px]">' +
+                        '<span><strong style="color:' + pkTeam.color + '">' + pkTeam.shortName + '</strong> • ' + (pk.shooterName || 'Cobrador #' + (pIdx + 1)) + '</span>' +
+                        '<span class="font-bold ' + (pk.scored ? 'text-emerald-400' : 'text-rose-400') + '">' + (pk.scored ? '✅ GOL' : '❌ FALLÓ / ATAJADO') + '</span>' +
+                    '</div>';
+                }
+                var penWinner = m.homePenalties > m.awayPenalties ? home : (m.awayPenalties > m.homePenalties ? away : null);
+                penReportHtml = '<div class="p-3.5 rounded-xl bg-purple-500/15 border border-purple-500/40 space-y-2 text-xs">' +
+                    '<div class="flex flex-wrap items-center justify-between gap-2">' +
+                        '<span class="font-black text-purple-300 uppercase">🎯 Definición por Tanda de Penales (Desempate)</span>' +
+                        '<span class="font-mono font-black text-white text-sm">' + home.shortName + ' ' + m.homePenalties + ' - ' + m.awayPenalties + ' ' + away.shortName + '</span>' +
+                    '</div>' +
+                    (penWinner ? '<div class="text-emerald-300 font-bold">🏆 Ganador en Penales: ' + penWinner.name + ' <span class="text-slate-400 font-normal text-[11px]">(Los penales de desempate no suman al histórico de goles ni al Guante de Oro)</span></div>' : '') +
+                    (penLogRows ? '<div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">' + penLogRows + '</div>' : '') +
+                '</div>';
+            }
+
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
             body.innerHTML = '' +
@@ -961,13 +1038,15 @@
                         '</div>' +
                         '<div class="font-mono text-2xl sm:text-3xl font-black text-white">' +
                             (m.status === 'scheduled' ? 'VS' : (m.homeScore + ' : ' + m.awayScore)) +
-                            '<div class="text-[10px] text-emerald-400 mt-1">' + (m.status === 'live' ? ('EN VIVO ' + m.minute + '\'') : m.status === 'finished' ? 'FINALIZADO' : 'PROGRAMADO') + '</div>' +
+                            '<div class="text-[10px] mt-1">' + renderMatchStatusBadgeHtml(m) + '</div>' +
                         '</div>' +
                         '<div>' +
                             '<div class="w-10 h-10 mx-auto rounded-xl flex items-center justify-center font-black text-slate-950 text-xs mb-1" style="background:' + away.color + '">' + away.shortName + '</div>' +
                             '<div class="text-xs font-bold text-white">' + away.name + '</div>' +
                         '</div>' +
                     '</div>' +
+                    specialNoticeHtml +
+                    penReportHtml +
                     '<div class="space-y-2">' +
                         '<span class="text-xs font-bold uppercase text-slate-400 block">Cronología Oficial de Eventos:</span>' +
                         evHtml +
@@ -1648,23 +1727,24 @@
                 var h = findTeam(m.homeId);
                 var a = findTeam(m.awayId);
 
-                var card = '<div onclick="openMatchReportModal(\'' + m.id + '\')" class="glass-panel p-4 border ' + (isMyMatch ? 'border-emerald-500/40' : 'border-slate-800') + ' hover:border-emerald-400 cursor-pointer space-y-2.5">' +
+                var card = '<div onclick="openMatchReportModal(\'' + m.id + '\')" class="glass-panel p-4 border ' + (m.status === 'suspended' ? 'border-rose-500/50' : isMyMatch ? 'border-emerald-500/40' : 'border-slate-800') + ' hover:border-emerald-400 cursor-pointer space-y-2.5">' +
                     '<div class="flex items-center justify-between text-[10px] font-mono">' +
                         '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-bold">' + (tour ? tour.name : 'Torneo') + '</span>' +
-                        '<span class="px-2 py-0.5 rounded font-bold ' + (m.status === 'live' ? 'bg-emerald-500/20 text-emerald-400' : m.status === 'finished' ? 'bg-slate-800 text-slate-300' : 'bg-amber-500/20 text-amber-300') + '">' +
-                            (m.status === 'live' ? ('🔴 EN VIVO ' + m.minute + '\'') : m.status === 'finished' ? 'FINALIZADO' : 'PRÓXIMO PARTIDO') +
-                        '</span>' +
+                        renderMatchStatusBadgeHtml(m) +
                     '</div>' +
                     '<div class="text-xs text-cyan-400 font-mono font-bold">' + m.round + ' • ' + m.date + ' • ' + m.pitch + '</div>' +
                     '<div class="grid grid-cols-3 items-center text-center py-1">' +
                         '<div class="text-left font-bold text-xs sm:text-sm ' + (h.id === club.id ? 'text-emerald-400' : 'text-white') + '">' + h.name + '</div>' +
-                        '<div class="font-mono text-lg font-black text-white">' + (m.status === 'scheduled' ? 'VS' : (m.homeScore + ' : ' + m.awayScore)) + '</div>' +
+                        '<div class="font-mono text-lg font-black text-white">' + renderMatchScoreTextHtml(m) + '</div>' +
                         '<div class="text-right font-bold text-xs sm:text-sm ' + (a.id === club.id ? 'text-emerald-400' : 'text-white') + '">' + a.name + '</div>' +
                     '</div>' +
+                    (m.status === 'suspended'
+                        ? '<div class="text-[11px] text-rose-300 font-bold">🌧️ Suspendido (' + (m.suspensionReason || 'Lluvia / Fuerza mayor') + ') — En espera de reprogramación</div>'
+                        : '') +
                     '<div class="text-[11px] text-emerald-400 font-bold text-right">📄 Ver Acta / Detalles →</div>' +
                 '</div>';
 
-                if (isMyMatch && (m.status === 'scheduled' || m.status === 'live')) {
+                if (isMyMatch && (m.status === 'scheduled' || m.status === 'live' || m.status === 'suspended')) {
                     myNextHtml += card;
                 } else if (isMyMatch && m.status === 'finished') {
                     myFinishedHtml += card;
@@ -2966,10 +3046,12 @@
                             '<div>' +
                                 '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Carnet & Expediente Oficial • ' + club.name + '</span>' +
                                 '<h3 class="text-lg font-black text-white m-0">' + p.name + ' (' + p.pos + ')</h3>' +
-                                '<label class="inline-block mt-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px] font-bold cursor-pointer">' +
-                                    '📷 Actualizar Foto de Perfil' +
-                                    '<input type="file" accept="image/*" style="display:none;" onchange="handleUpdateExistingPlayerPhoto(this, \'' + p.id + '\')">' +
-                                '</label>' +
+                                ((db.currentUser && (db.currentUser.role === 'club' || db.currentUser.role === 'admin')) ? (
+                                    '<label class="inline-block mt-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px] font-bold cursor-pointer">' +
+                                        '📷 Actualizar Foto de Perfil' +
+                                        '<input type="file" accept="image/*" style="display:none;" onchange="handleUpdateExistingPlayerPhoto(this, \'' + p.id + '\')">' +
+                                    '</label>'
+                                ) : '') +
                             '</div>' +
                         '</div>' +
                         '<button onclick="closeGlobalModal()" class="px-3 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
@@ -3284,14 +3366,15 @@
                     (sel ? 'bg-slate-800 border-amber-400' : 'bg-slate-900 border-slate-800') + '">' +
                     '<div class="flex items-center justify-between text-[10px] font-mono mb-1">' +
                         '<span class="text-cyan-400 font-bold">' + item.round + ' • ' + item.date + '</span>' +
-                        '<span class="px-2 py-0.5 rounded font-bold ' + (item.status === 'live' ? 'bg-emerald-500/20 text-emerald-400' : item.status === 'finished' ? 'bg-slate-700 text-slate-200' : 'bg-amber-500/20 text-amber-300') + '">' +
-                            (item.status === 'live' ? ('EN VIVO ' + item.minute + '\'') : item.status === 'finished' ? 'FINALIZADO' : 'PROGRAMADO') +
-                        '</span>' +
+                        renderMatchStatusBadgeHtml(item) +
                     '</div>' +
                     '<div class="flex items-center justify-between text-xs font-extrabold text-white">' +
                         '<span>' + h.name + ' vs ' + a.name + '</span>' +
-                        '<span class="font-mono text-sm">' + (item.status === 'scheduled' ? 'VS' : (item.homeScore + ' - ' + item.awayScore)) + '</span>' +
+                        '<span class="font-mono text-sm">' + renderMatchScoreTextHtml(item) + '</span>' +
                     '</div>' +
+                    (item.status === 'suspended' && item.suspensionReason
+                        ? '<div class="text-[10px] text-rose-300 mt-1">🌧️ Motivo: ' + item.suspensionReason + '</div>'
+                        : '') +
                 '</div>';
             }
 
@@ -3322,6 +3405,8 @@
                 }
 
                 var clockText = String(activeMatch.minute || 0).padStart(2, '0') + ':' + String(timerSeconds).padStart(2, '0');
+                var isTiedScore = (activeMatch.homeScore || 0) === (activeMatch.awayScore || 0);
+                var hasPenaltiesRecorded = (activeMatch.homePenalties !== null && activeMatch.homePenalties !== undefined && activeMatch.awayPenalties !== null && activeMatch.awayPenalties !== undefined);
 
                 controlHtml = '' +
                     '<div class="glass-panel p-5 border border-amber-500/40 space-y-4">' +
@@ -3341,8 +3426,16 @@
                                 '<div class="w-11 h-11 mx-auto rounded-xl flex items-center justify-center font-black text-slate-950 text-xs mb-1" style="background:' + homeTeam.color + '">' + homeTeam.shortName + '</div>' +
                                 '<div class="text-xs sm:text-sm font-black text-white">' + homeTeam.name + '</div>' +
                             '</div>' +
-                            '<div class="font-mono text-3xl sm:text-5xl font-black text-white">' +
-                                (activeMatch.status === 'scheduled' ? 'VS' : (activeMatch.homeScore + ' : ' + activeMatch.awayScore)) +
+                            '<div>' +
+                                '<div class="font-mono text-3xl sm:text-5xl font-black text-white">' +
+                                    (activeMatch.status === 'scheduled' ? 'VS' : ((activeMatch.homeScore || 0) + ' : ' + (activeMatch.awayScore || 0))) +
+                                '</div>' +
+                                (hasPenaltiesRecorded
+                                    ? '<div class="mt-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/40 font-mono text-xs font-black inline-block">🎯 Penales: ' + activeMatch.homePenalties + ' - ' + activeMatch.awayPenalties + '</div>'
+                                    : '') +
+                                (activeMatch.forfeitWinnerId
+                                    ? '<div class="mt-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono text-xs font-black inline-block">🏳️ Ganó por Forfeit: ' + findTeam(activeMatch.forfeitWinnerId).shortName + '</div>'
+                                    : '') +
                             '</div>' +
                             '<div>' +
                                 '<div class="w-11 h-11 mx-auto rounded-xl flex items-center justify-center font-black text-slate-950 text-xs mb-1" style="background:' + awayTeam.color + '">' + awayTeam.shortName + '</div>' +
@@ -3350,11 +3443,25 @@
                             '</div>' +
                         '</div>' +
 
-                        '<!-- Botones de Empezar / Finalizar Partido -->' +
+                        '<!-- Botones de Empezar / Finalizar / Suspender / Forfeit / Penales -->' +
                         (activeMatch.status === 'scheduled' ? (
-                            '<div class="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-center space-y-2">' +
-                                '<p class="text-xs text-slate-300 m-0">El partido está programado. Pulsa para dar el pitazo inicial.</p>' +
-                                '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'live\')" class="btn-primary-gradient px-6 py-3 text-xs sm:text-sm font-black">🟢 EMPEZAR PARTIDO (PONER EN VIVO)</button>' +
+                            '<div class="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-center space-y-3">' +
+                                '<p class="text-xs text-slate-300 m-0">El partido está programado (Reloj en <strong>00:00</strong>). Pulsa para dar el pitazo inicial o reportar una incidencia previa:</p>' +
+                                '<div class="flex flex-wrap justify-center gap-2">' +
+                                    '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'live\')" class="btn-primary-gradient px-6 py-3 text-xs sm:text-sm font-black">🟢 EMPEZAR PARTIDO (PONER EN VIVO 00:00)</button>' +
+                                    '<button onclick="openRefereeSuspendMatchModal(\'' + activeMatch.id + '\')" class="px-4 py-2.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">🌧️ Suspender por Lluvia / Motivo</button>' +
+                                    '<button onclick="openRefereeForfeitModal(\'' + activeMatch.id + '\')" class="px-4 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🏳️ Declarar Ganador por Forfeit</button>' +
+                                '</div>' +
+                            '</div>'
+                        ) : activeMatch.status === 'suspended' ? (
+                            '<div class="p-4 rounded-2xl bg-rose-500/15 border border-rose-500/40 space-y-3">' +
+                                '<div class="flex flex-wrap items-center justify-between gap-2">' +
+                                    '<div>' +
+                                        '<div class="text-xs font-black text-rose-300 uppercase">🌧️ Encuentro Suspendido — Pendiente de Reprogramación por el Organizador</div>' +
+                                        '<div class="text-xs text-slate-200 mt-0.5">Motivo en acta: <strong>' + (activeMatch.suspensionReason || 'Lluvia / Fuerza mayor') + '</strong></div>' +
+                                    '</div>' +
+                                    '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'live\')" class="px-3.5 py-2 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs border-0 cursor-pointer">🟢 Reanudar Partido Ahora</button>' +
+                                '</div>' +
                             '</div>'
                         ) : activeMatch.status === 'live' ? (
                             '<div class="space-y-4">' +
@@ -3364,8 +3471,6 @@
                                             (timerRunning ? '⏸ Pausar Reloj' : '▶ Iniciar Reloj') +
                                         '</button>' +
                                         '<button onclick="refResetTimer(\'' + activeMatch.id + '\')" class="px-3 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">🔄 Reiniciar Tiempo (00:00)</button>' +
-                                        '<button onclick="refAddMinute(\'' + activeMatch.id + '\', 1)" class="px-2.5 py-2 rounded-xl bg-slate-800 text-white text-xs font-mono font-bold border-0 cursor-pointer">+1m</button>' +
-                                        '<button onclick="refAddMinute(\'' + activeMatch.id + '\', 5)" class="px-2.5 py-2 rounded-xl bg-slate-800 text-white text-xs font-mono font-bold border-0 cursor-pointer">+5m</button>' +
                                         '<select onchange="refChangePeriod(\'' + activeMatch.id + '\', this.value)" class="px-2.5 py-1.5 rounded-xl bg-slate-950 text-amber-300 border border-slate-700 text-xs font-mono font-bold">' +
                                             '<option value="1T" ' + (activeMatch.period === '1T' ? 'selected' : '') + '>1T (Primer Tiempo)</option>' +
                                             '<option value="ET" ' + (activeMatch.period === 'ET' ? 'selected' : '') + '>ET (Entretiempo)</option>' +
@@ -3375,6 +3480,16 @@
                                         '</select>' +
                                     '</div>' +
                                     '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'finished\')" class="px-4 py-2 rounded-xl bg-rose-500 text-slate-950 font-black text-xs border-0 cursor-pointer">🏁 FINALIZAR PARTIDO</button>' +
+                                '</div>' +
+
+                                '<div class="flex flex-wrap items-center justify-between gap-2 bg-slate-900/80 p-3 rounded-2xl border border-slate-800">' +
+                                    '<div class="flex flex-wrap gap-2">' +
+                                        '<button onclick="openRefereeSuspendMatchModal(\'' + activeMatch.id + '\')" class="px-3 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">🌧️ Suspender por Lluvia / Motivo</button>' +
+                                        '<button onclick="openRefereeForfeitModal(\'' + activeMatch.id + '\')" class="px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🏳️ Ganador por Forfeit</button>' +
+                                    '</div>' +
+                                    '<button onclick="openRefereePenaltiesModal(\'' + activeMatch.id + '\')" class="px-3.5 py-2 rounded-xl ' + (isTiedScore ? 'bg-purple-500 text-slate-950 font-black' : 'bg-purple-500/20 text-purple-300 border border-purple-500/40 font-extrabold') + ' text-xs cursor-pointer">' +
+                                        '🎯 Definir por Penales (Desempate)' +
+                                    '</button>' +
                                 '</div>' +
 
                                 '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
@@ -3418,9 +3533,14 @@
                                 '</div>' +
                             '</div>'
                         ) : (
-                            '<div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">' +
+                            '<div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-2">' +
                                 '<span class="text-xs font-bold text-emerald-400">✅ Partido Finalizado Oficialmente</span>' +
-                                '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'live\')" class="px-3 py-1.5 rounded-xl bg-slate-800 text-amber-300 text-xs font-bold border-0 cursor-pointer">🔓 Reabrir Acta</button>' +
+                                '<div class="flex flex-wrap gap-2">' +
+                                    (isTiedScore
+                                        ? '<button onclick="openRefereePenaltiesModal(\'' + activeMatch.id + '\')" class="px-3 py-1.5 rounded-xl bg-purple-500 text-slate-950 text-xs font-black border-0 cursor-pointer">🎯 Anotar / Ver Penales</button>'
+                                        : '') +
+                                    '<button onclick="refSetMatchState(\'' + activeMatch.id + '\', \'live\')" class="px-3 py-1.5 rounded-xl bg-slate-800 text-amber-300 text-xs font-bold border-0 cursor-pointer">🔓 Reabrir Acta</button>' +
+                                '</div>' +
                             '</div>'
                         )) +
 
@@ -3461,10 +3581,11 @@
                     '<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">' +
                         '<div class="lg:col-span-5 glass-panel p-4 border border-slate-800 space-y-3">' +
                             '<h2 class="text-sm font-black text-white m-0">📅 Calendario Oficial de Partidos</h2>' +
-                            '<div class="grid grid-cols-4 gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] font-bold">' +
+                            '<div class="grid grid-cols-5 gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] font-bold">' +
                                 '<button onclick="refFilter=\'all\'; renderViewport();" class="py-1.5 rounded-lg border-0 cursor-pointer ' + (refFilter === 'all' ? 'bg-amber-500 text-slate-950 font-black' : 'bg-transparent text-slate-400') + '">Todos</button>' +
                                 '<button onclick="refFilter=\'live\'; renderViewport();" class="py-1.5 rounded-lg border-0 cursor-pointer ' + (refFilter === 'live' ? 'bg-emerald-500 text-slate-950 font-black' : 'bg-transparent text-slate-400') + '">En Vivo</button>' +
                                 '<button onclick="refFilter=\'scheduled\'; renderViewport();" class="py-1.5 rounded-lg border-0 cursor-pointer ' + (refFilter === 'scheduled' ? 'bg-cyan-500 text-slate-950 font-black' : 'bg-transparent text-slate-400') + '">Por Jugar</button>' +
+                                '<button onclick="refFilter=\'suspended\'; renderViewport();" class="py-1.5 rounded-lg border-0 cursor-pointer ' + (refFilter === 'suspended' ? 'bg-rose-500 text-slate-950 font-black' : 'bg-transparent text-slate-400') + '">Suspendidos</button>' +
                                 '<button onclick="refFilter=\'finished\'; renderViewport();" class="py-1.5 rounded-lg border-0 cursor-pointer ' + (refFilter === 'finished' ? 'bg-slate-700 text-white font-black' : 'bg-transparent text-slate-400') + '">Finalizados</button>' +
                             '</div>' +
                             '<div class="space-y-2.5">' + listHtml + '</div>' +
@@ -3476,42 +3597,426 @@
 
         function selectRefMatch(id) {
             stopRefTimer();
+            timerSeconds = 0;
             currentRefMatchId = id;
             renderViewport();
+        }
+
+        function checkAndAutoGenerateFinalLocal(finishedMatch) {
+            if (!finishedMatch) return;
+            if (finishedMatch.round !== 'Semifinal 1' && finishedMatch.round !== 'Semifinal 2') return;
+
+            var tourneyId = finishedMatch.tournamentId;
+            var sf1 = null, sf2 = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                var m = db.matches[i];
+                if (m.tournamentId !== tourneyId) continue;
+                if (m.round === 'Semifinal 1') sf1 = m;
+                if (m.round === 'Semifinal 2') sf2 = m;
+            }
+            if (!sf1 || !sf2 || sf1.status !== 'finished' || sf2.status !== 'finished') return;
+
+            function getMatchWinnerIdLocal(mObj) {
+                if (mObj.forfeitWinnerId) return mObj.forfeitWinnerId;
+                if ((mObj.homeScore || 0) > (mObj.awayScore || 0)) return mObj.homeId;
+                if ((mObj.awayScore || 0) > (mObj.homeScore || 0)) return mObj.awayId;
+                if (mObj.homePenalties !== null && mObj.awayPenalties !== null && mObj.homePenalties !== mObj.awayPenalties) {
+                    return mObj.homePenalties > mObj.awayPenalties ? mObj.homeId : mObj.awayId;
+                }
+                return mObj.homeId;
+            }
+
+            var finalistA = getMatchWinnerIdLocal(sf1);
+            var finalistB = getMatchWinnerIdLocal(sf2);
+            if (!finalistA || !finalistB) return;
+
+            var t = findTournament(tourneyId);
+            var existingFinal = null;
+            for (var j = 0; j < db.matches.length; j++) {
+                if (db.matches[j].tournamentId === tourneyId && db.matches[j].round === '🏆 GRAN FINAL') {
+                    existingFinal = db.matches[j];
+                }
+            }
+            if (existingFinal) {
+                if (existingFinal.status === 'scheduled') {
+                    existingFinal.homeId = finalistA;
+                    existingFinal.awayId = finalistB;
+                }
+            } else {
+                db.matches.push({
+                    id: 'm-fin-' + Date.now(),
+                    tournamentId: tourneyId,
+                    round: '🏆 GRAN FINAL',
+                    homeId: finalistA,
+                    awayId: finalistB,
+                    homeScore: 0,
+                    awayScore: 0,
+                    status: 'scheduled',
+                    period: '1T',
+                    minute: 0,
+                    date: 'Gran Final • 21:00',
+                    pitch: 'Estadio Principal (' + (t ? t.pitchSize : '7v7') + ')'
+                });
+            }
+            notify('👑 ¡Semifinales completadas! Gran Final generada automáticamente: ' + findTeam(finalistA).name + ' vs ' + findTeam(finalistB).name);
         }
 
         function refSetMatchState(matchId, newState) {
             stopRefTimer();
             var targetMinute = 0;
+            var targetMatch = null;
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
-                    db.matches[i].status = newState;
-                    if (newState === 'live' && (!db.matches[i].minute || db.matches[i].minute === 0)) {
-                        db.matches[i].minute = 1;
+                    targetMatch = db.matches[i];
+                    // Si un partido programado o suspendido pasa a EN VIVO, el reloj empieza exactamente en 00:00
+                    if (newState === 'live' && (targetMatch.status === 'scheduled' || targetMatch.status === 'suspended')) {
+                        targetMatch.minute = 0;
+                        timerSeconds = 0;
                     }
-                    targetMinute = db.matches[i].minute || 1;
+                    targetMatch.status = newState;
+                    if (newState === 'live') {
+                        targetMatch.suspensionReason = null;
+                    }
+                    targetMinute = targetMatch.minute || 0;
                 }
+            }
+            if (newState === 'finished' && targetMatch) {
+                checkAndAutoGenerateFinalLocal(targetMatch);
             }
             saveDB();
             renderViewport();
             apiRequest('PUT', '/api/matches/' + matchId + '/state', {
                 status: newState,
-                minute: targetMinute
+                minute: targetMinute,
+                suspensionReason: newState === 'live' ? null : undefined
             });
-            notify(newState === 'live' ? '🟢 Partido iniciado (EN VIVO)' : '🏁 Partido finalizado oficialmente');
+            notify(newState === 'live' ? '🟢 Partido en vivo (Reloj en 00:00 — pulsa Iniciar Reloj)' : '🏁 Partido finalizado oficialmente');
         }
 
-        function refAddMinute(matchId, delta) {
-            var updatedMinute = 0;
+        function openRefereeSuspendMatchModal(matchId) {
+            var m = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) m = db.matches[i];
+            }
+            if (!m) return;
+            var h = findTeam(m.homeId);
+            var a = findTeam(m.awayId);
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-rose-400 font-bold">Acta Arbitral de Suspensión • Liga F7 Caracas</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">🌧️ Suspender Partido — ' + h.name + ' vs ' + a.name + '</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<p class="text-xs text-slate-300 m-0">Al suspender el encuentro, quedará marcado como <strong class="text-rose-300">🌧️ SUSPENDIDO / REPROGRAMAR</strong> y el Organizador deberá asignarle nueva fecha y hora en el calendario.</p>' +
+                    '<form onsubmit="handleConfirmSuspendMatch(event, \'' + m.id + '\')" class="space-y-3 text-xs">' +
+                        '<div>' +
+                            '<label class="block font-bold text-slate-300 mb-1">Motivo Oficial de la Suspensión <span class="text-rose-400">*</span></label>' +
+                            '<select id="ref-susp-preset" onchange="document.getElementById(\'ref-susp-reason\').value = this.value;" class="fallback-input mb-2">' +
+                                '<option value="Lluvia fuerte / Cancha inundada">🌧️ Lluvia fuerte / Cancha inundada</option>' +
+                                '<option value="Falla eléctrica / Iluminación en sede">⚡ Falla eléctrica / Iluminación en sede</option>' +
+                                '<option value="Caso fortuito o fuerza mayor">⚠️ Caso fortuito o fuerza mayor</option>' +
+                                '<option value="Acuerdo oficial en mesa técnica">📋 Acuerdo oficial en mesa técnica</option>' +
+                            '</select>' +
+                            '<input type="text" id="ref-susp-reason" required value="Lluvia fuerte / Cancha inundada" placeholder="Especifica el motivo de suspensión..." class="fallback-input">' +
+                        '</div>' +
+                        '<div class="flex justify-end gap-2 pt-2">' +
+                            '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
+                            '<button type="submit" class="px-5 py-2.5 rounded-xl bg-rose-500 text-slate-950 font-black text-xs border-0 cursor-pointer">🌧️ Confirmar Suspensión para Reprogramar</button>' +
+                        '</div>' +
+                    '</form>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function handleConfirmSuspendMatch(e, matchId) {
+            e.preventDefault();
+            stopRefTimer();
+            var reason = document.getElementById('ref-susp-reason').value.trim() || 'Lluvia / Fuerza mayor';
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
-                    db.matches[i].minute = (db.matches[i].minute || 0) + delta;
-                    updatedMinute = db.matches[i].minute;
+                    db.matches[i].status = 'suspended';
+                    db.matches[i].suspensionReason = reason;
+                }
+            }
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                status: 'suspended',
+                suspensionReason: reason
+            });
+            notify('🌧️ Partido suspendido (' + reason + '). Notificado al Organizador para reprogramar.');
+        }
+
+        function openRefereeForfeitModal(matchId) {
+            var m = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) m = db.matches[i];
+            }
+            if (!m) return;
+            var h = findTeam(m.homeId);
+            var a = findTeam(m.awayId);
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-amber-400 font-bold">Resolución Arbitral por Inasistencia (W.O.)</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">🏳️ Declarar Victoria por Forfeit</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<p class="text-xs text-slate-300 m-0">Selecciona cuál club estuvo presente en cancha y gana el encuentro por <strong class="text-amber-300">Forfeit (3 - 0 oficial)</strong> debido a la inasistencia del equipo rival. <span class="text-slate-400">(Otorga los 3 puntos en la tabla pero no altera las estadísticas individuales de goleadores ni porteros).</span></p>' +
+                    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">' +
+                        '<button onclick="handleConfirmForfeitWinner(\'' + m.id + '\', \'' + h.id + '\')" class="p-4 rounded-2xl bg-slate-900 hover:bg-emerald-500/15 border border-emerald-500/40 text-left space-y-1.5 cursor-pointer transition">' +
+                            '<div class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Gana Local por Forfeit (3 - 0)</div>' +
+                            '<div class="text-sm font-black text-white">🏆 ' + h.name + '</div>' +
+                            '<div class="text-[11px] text-slate-400">Inasistencia de ' + a.name + '</div>' +
+                        '</button>' +
+                        '<button onclick="handleConfirmForfeitWinner(\'' + m.id + '\', \'' + a.id + '\')" class="p-4 rounded-2xl bg-slate-900 hover:bg-cyan-500/15 border border-cyan-500/40 text-left space-y-1.5 cursor-pointer transition">' +
+                            '<div class="text-[10px] font-mono uppercase text-cyan-400 font-bold">Gana Visitante por Forfeit (0 - 3)</div>' +
+                            '<div class="text-sm font-black text-white">🏆 ' + a.name + '</div>' +
+                            '<div class="text-[11px] text-slate-400">Inasistencia de ' + h.name + '</div>' +
+                        '</button>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function handleConfirmForfeitWinner(matchId, winnerTeamId) {
+            stopRefTimer();
+            var targetMatch = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) {
+                    targetMatch = db.matches[i];
+                    var isHomeWin = (targetMatch.homeId === winnerTeamId);
+                    targetMatch.homeScore = isHomeWin ? 3 : 0;
+                    targetMatch.awayScore = isHomeWin ? 0 : 3;
+                    targetMatch.status = 'finished';
+                    targetMatch.forfeitWinnerId = winnerTeamId;
+                    targetMatch.suspensionReason = null;
+                }
+            }
+            if (targetMatch) {
+                checkAndAutoGenerateFinalLocal(targetMatch);
+            }
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            if (targetMatch) {
+                apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                    status: 'finished',
+                    forfeitWinnerId: winnerTeamId,
+                    homeScore: targetMatch.homeScore,
+                    awayScore: targetMatch.awayScore,
+                    suspensionReason: null
+                });
+            }
+            var winTeam = findTeam(winnerTeamId);
+            notify('🏳️ Victoria por Forfeit (3-0) registrada a favor de ' + winTeam.name);
+        }
+
+        function openRefereePenaltiesModal(matchId) {
+            var m = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) m = db.matches[i];
+            }
+            if (!m) return;
+            var home = findTeam(m.homeId);
+            var away = findTeam(m.awayId);
+
+            if (!Array.isArray(m.penaltiesLog)) m.penaltiesLog = [];
+            if (m.homePenalties === null || m.homePenalties === undefined) m.homePenalties = 0;
+            if (m.awayPenalties === null || m.awayPenalties === undefined) m.awayPenalties = 0;
+
+            var homePlayersOpts = '<option value="Cobrador ' + home.shortName + '">— Jugador de ' + home.shortName + ' —</option>';
+            var awayPlayersOpts = '<option value="Cobrador ' + away.shortName + '">— Jugador de ' + away.shortName + ' —</option>';
+            for (var i = 0; i < db.players.length; i++) {
+                var p = db.players[i];
+                if (p.teamId === home.id) {
+                    homePlayersOpts += '<option value="#' + p.number + ' ' + p.name + '">#' + p.number + ' ' + p.name + '</option>';
+                }
+                if (p.teamId === away.id) {
+                    awayPlayersOpts += '<option value="#' + p.number + ' ' + p.name + '">#' + p.number + ' ' + p.name + '</option>';
+                }
+            }
+
+            var logHtml = '';
+            for (var j = 0; j < m.penaltiesLog.length; j++) {
+                var pk = m.penaltiesLog[j];
+                var pkTeam = findTeam(pk.teamId);
+                logHtml += '<div class="p-2 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between text-xs">' +
+                    '<div>' +
+                        '<span class="font-mono text-[10px] text-slate-400 mr-1.5">#' + (j + 1) + '</span>' +
+                        '<strong style="color:' + pkTeam.color + '">' + pkTeam.shortName + '</strong> • ' +
+                        '<span class="text-white font-bold">' + (pk.shooterName || 'Cobrador') + '</span>' +
+                    '</div>' +
+                    '<span class="px-2 py-0.5 rounded font-black text-[11px] ' + (pk.scored ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300') + '">' +
+                        (pk.scored ? '⚽ GOL DE PENAL' : '❌ FALLÓ / ATAJADO') +
+                    '</span>' +
+                '</div>';
+            }
+            if (!logHtml) {
+                logHtml = '<div class="p-3 rounded-xl bg-slate-900/60 text-center text-xs text-slate-400">Aún no se han registrado cobros en la tanda de penales.</div>';
+            }
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-purple-300 font-bold">Desempate Oficial • No Suma a Goleadores ni a Guante de Oro</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">🎯 Tanda de Penales — ' + home.name + ' vs ' + away.name + '</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+
+                    '<div class="grid grid-cols-3 items-center text-center bg-slate-900 p-4 rounded-2xl border border-purple-500/40">' +
+                        '<div>' +
+                            '<div class="text-xs font-black text-white">' + home.name + '</div>' +
+                            '<div class="text-[10px] text-slate-400">Tiempo Reg.: ' + (m.homeScore || 0) + '</div>' +
+                        '</div>' +
+                        '<div>' +
+                            '<div class="text-[10px] font-mono uppercase text-purple-300 font-bold">MARCADOR PENALES</div>' +
+                            '<div class="font-mono text-3xl sm:text-4xl font-black text-amber-300">' + m.homePenalties + ' : ' + m.awayPenalties + '</div>' +
+                        '</div>' +
+                        '<div>' +
+                            '<div class="text-xs font-black text-white">' + away.name + '</div>' +
+                            '<div class="text-[10px] text-slate-400">Tiempo Reg.: ' + (m.awayScore || 0) + '</div>' +
+                        '</div>' +
+                    '</div>' +
+
+                    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">' +
+                        '<div class="p-3.5 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-2.5">' +
+                            '<div class="font-black text-emerald-400 uppercase">🎯 Cobro de ' + home.name + '</div>' +
+                            '<select id="pen-home-shooter" class="fallback-input">' + homePlayersOpts + '</select>' +
+                            '<div class="grid grid-cols-2 gap-2">' +
+                                '<button onclick="refAddPenaltyKick(\'' + m.id + '\', \'home\', true)" class="py-2 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs border-0 cursor-pointer">✅ Anotó Penal</button>' +
+                                '<button onclick="refAddPenaltyKick(\'' + m.id + '\', \'home\', false)" class="py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold text-xs cursor-pointer">❌ Falló / Atajado</button>' +
+                            '</div>' +
+                        '</div>' +
+
+                        '<div class="p-3.5 rounded-2xl bg-slate-900 border border-cyan-500/30 space-y-2.5">' +
+                            '<div class="font-black text-cyan-400 uppercase">🎯 Cobro de ' + away.name + '</div>' +
+                            '<select id="pen-away-shooter" class="fallback-input">' + awayPlayersOpts + '</select>' +
+                            '<div class="grid grid-cols-2 gap-2">' +
+                                '<button onclick="refAddPenaltyKick(\'' + m.id + '\', \'away\', true)" class="py-2 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs border-0 cursor-pointer">✅ Anotó Penal</button>' +
+                                '<button onclick="refAddPenaltyKick(\'' + m.id + '\', \'away\', false)" class="py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold text-xs cursor-pointer">❌ Falló / Atajado</button>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>' +
+
+                    '<div class="space-y-1.5">' +
+                        '<div class="flex items-center justify-between">' +
+                            '<span class="text-xs font-bold uppercase text-slate-400">Secuencia de Penales:</span>' +
+                            (m.penaltiesLog.length > 0
+                                ? '<button onclick="refClearPenalties(\'' + m.id + '\')" class="px-2.5 py-1 rounded-lg bg-slate-800 text-rose-300 text-[11px] font-bold border-0 cursor-pointer">🔄 Reiniciar Tanda</button>'
+                                : '') +
+                        '</div>' +
+                        '<div class="space-y-1.5 max-h-44 overflow-y-auto">' + logHtml + '</div>' +
+                    '</div>' +
+
+                    '<div class="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-slate-800">' +
+                        '<span class="text-[11px] text-slate-400">ℹ️ Estos penales solo definen el ganador del partido; no se suman a la Bota de Oro ni al Guante de Oro.</span>' +
+                        '<div class="flex gap-2">' +
+                            '<button onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-200 text-xs font-bold border-0 cursor-pointer">Cerrar</button>' +
+                            '<button onclick="refFinishMatchFromPenalties(\'' + m.id + '\')" class="btn-primary-gradient px-5 py-2.5 text-xs font-black">🏁 Finalizar Partido con este Resultado de Penales</button>' +
+                        '</div>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function refAddPenaltyKick(matchId, side, scored) {
+            var m = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) m = db.matches[i];
+            }
+            if (!m) return;
+            if (!Array.isArray(m.penaltiesLog)) m.penaltiesLog = [];
+            if (m.homePenalties === null || m.homePenalties === undefined) m.homePenalties = 0;
+            if (m.awayPenalties === null || m.awayPenalties === undefined) m.awayPenalties = 0;
+
+            var selEl = document.getElementById(side === 'home' ? 'pen-home-shooter' : 'pen-away-shooter');
+            var shooterName = selEl ? selEl.value : 'Cobrador';
+            var teamId = side === 'home' ? m.homeId : m.awayId;
+
+            if (scored) {
+                if (side === 'home') m.homePenalties++;
+                else m.awayPenalties++;
+            }
+            m.penaltiesLog.push({
+                teamId: teamId,
+                side: side,
+                shooterName: shooterName,
+                scored: Boolean(scored)
+            });
+
+            saveDB();
+            renderViewport();
+            openRefereePenaltiesModal(matchId);
+            apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                period: 'PEN',
+                homePenalties: m.homePenalties,
+                awayPenalties: m.awayPenalties,
+                penaltiesLog: m.penaltiesLog
+            });
+        }
+
+        function refClearPenalties(matchId) {
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) {
+                    db.matches[i].homePenalties = null;
+                    db.matches[i].awayPenalties = null;
+                    db.matches[i].penaltiesLog = [];
                 }
             }
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/matches/' + matchId + '/state', { minute: updatedMinute });
+            openRefereePenaltiesModal(matchId);
+            apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                homePenalties: null,
+                awayPenalties: null,
+                penaltiesLog: []
+            });
+            notify('🔄 Tanda de penales reiniciada');
+        }
+
+        function refFinishMatchFromPenalties(matchId) {
+            stopRefTimer();
+            var targetMatch = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) {
+                    targetMatch = db.matches[i];
+                    targetMatch.status = 'finished';
+                    targetMatch.period = 'PEN';
+                }
+            }
+            if (targetMatch) {
+                checkAndAutoGenerateFinalLocal(targetMatch);
+            }
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            if (targetMatch) {
+                apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                    status: 'finished',
+                    period: 'PEN',
+                    homePenalties: targetMatch.homePenalties,
+                    awayPenalties: targetMatch.awayPenalties,
+                    penaltiesLog: targetMatch.penaltiesLog || []
+                });
+            }
+            notify('🏁 Partido finalizado por tanda de penales');
         }
 
         function refResetTimer(matchId) {
@@ -3771,10 +4276,9 @@
                         '<div class="flex flex-wrap gap-1.5">' +
                             '<button onclick="activeTourneyId=\'' + t.id + '\'; adminSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl bg-slate-900 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">📅 Ver Calendario (' + tMatchCount + ')</button>' +
                             '<button onclick="generateTourneyPlayoffs(\'' + t.id + '\')" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🏆 Generar Semifinales (Top 4)</button>' +
-                            '<button onclick="generateTourneyFinal(\'' + t.id + '\')" class="px-3 py-2 rounded-xl bg-purple-500/20 text-purple-300 border border-purple-500/40 text-xs font-extrabold cursor-pointer">👑 Generar Gran Final</button>' +
                             '<button onclick="handleAdminDeleteTourney(\'' + t.id + '\')" class="px-3 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-bold cursor-pointer">🗑️ Eliminar</button>' +
                         '</div>' +
-                        '<button onclick="generateTourneyFixture(\'' + t.id + '\')" class="btn-primary-gradient px-4 py-2 text-xs font-black">⚡ Generar Calendario Automático (Fixture)</button>' +
+                        '<button onclick="generateTourneyFixture(\'' + t.id + '\')" class="btn-primary-gradient px-4 py-2 text-xs font-black">⚡ Generar Calendario Ida y Vuelta (Fixture)</button>' +
                     '</div>' +
                 '</div>';
             }
@@ -4458,19 +4962,30 @@
             var round = document.getElementById('edt-m-round').value.trim();
             var date = document.getElementById('edt-m-date').value.trim();
             var pitch = document.getElementById('edt-m-pitch').value.trim();
+            var wasSuspended = false;
 
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
                     db.matches[i].round = round;
                     db.matches[i].date = date;
                     db.matches[i].pitch = pitch;
+                    if (db.matches[i].status === 'suspended') {
+                        db.matches[i].status = 'scheduled';
+                        db.matches[i].suspensionReason = null;
+                        wasSuspended = true;
+                    }
                 }
             }
             closeGlobalModal();
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/matches/' + matchId + '/schedule', { round: round, date: date, pitch: pitch });
-            notify('✅ Partido reprogramado: ' + date + ' en ' + pitch);
+            apiRequest('PUT', '/api/matches/' + matchId + '/schedule', {
+                round: round,
+                date: date,
+                pitch: pitch,
+                reactivateIfSuspended: true
+            });
+            notify(wasSuspended ? '✅ Partido reprogramado y reactivado en el calendario: ' + date + ' en ' + pitch : '✅ Partido reprogramado: ' + date + ' en ' + pitch);
         }
 
         function renderAdminPaymentsSection() {
@@ -4599,60 +5114,7 @@
                     { round: 'Semifinal 2', homeId: standings[1].teamId, awayId: standings[2].teamId, date: 'Playoffs • 21:15', pitch: 'Cancha Principal (' + t.pitchSize + ')' }
                 ]
             });
-            notify('🏆 Llaves de Semifinales generadas: ' + standings[0].name + ' vs ' + standings[3].name + ' y ' + standings[1].name + ' vs ' + standings[2].name);
-        }
-
-        function generateTourneyFinal(tourneyId) {
-            var t = findTournament(tourneyId);
-            if (!t) return;
-            var sf1 = null, sf2 = null;
-            for (var i = 0; i < db.matches.length; i++) {
-                var m = db.matches[i];
-                if (m.tournamentId === tourneyId && m.round === 'Semifinal 1') sf1 = m;
-                if (m.tournamentId === tourneyId && m.round === 'Semifinal 2') sf2 = m;
-            }
-
-            var finalistA = null;
-            var finalistB = null;
-            if (sf1 && sf2) {
-                finalistA = (sf1.homeScore >= sf1.awayScore) ? sf1.homeId : sf1.awayId;
-                finalistB = (sf2.homeScore >= sf2.awayScore) ? sf2.homeId : sf2.awayId;
-            } else {
-                var st = getStandings(tourneyId);
-                if (st.length < 2) {
-                    notify('⚠️ Se necesitan al menos 2 clubes para generar la Gran Final');
-                    return;
-                }
-                finalistA = st[0].teamId;
-                finalistB = st[1].teamId;
-            }
-
-            db.matches.push({
-                id: 'm-fin-' + Date.now(),
-                tournamentId: tourneyId,
-                round: '🏆 GRAN FINAL',
-                homeId: finalistA,
-                awayId: finalistB,
-                homeScore: 0,
-                awayScore: 0,
-                status: 'scheduled',
-                period: '1T',
-                minute: 0,
-                date: 'Gran Final • 21:00',
-                pitch: 'Estadio Principal (' + t.pitchSize + ')'
-            });
-
-            activeTourneyId = tourneyId;
-            adminSection = 'calendar';
-            saveDB();
-            renderViewport();
-            apiRequest('POST', '/api/tournaments/' + tourneyId + '/playoffs', {
-                stage: 'final',
-                matches: [
-                    { round: '🏆 GRAN FINAL', homeId: finalistA, awayId: finalistB, date: 'Gran Final • 21:00', pitch: 'Estadio Principal (' + t.pitchSize + ')' }
-                ]
-            });
-            notify('👑 ¡Gran Final generada entre ' + findTeam(finalistA).name + ' y ' + findTeam(finalistB).name + '!');
+            notify('🏆 Llaves de Semifinales generadas: ' + standings[0].name + ' vs ' + standings[3].name + ' y ' + standings[1].name + ' vs ' + standings[2].name + ' (La Gran Final se creará automáticamente al finalizar ambas)');
         }
 
         function renderPlayoffsBracketHtml(tourneyId) {
@@ -4669,21 +5131,30 @@
             function renderBracketMatchBox(matchObj, label) {
                 if (!matchObj) {
                     return '<div class="p-3.5 rounded-2xl bg-slate-900/60 border border-dashed border-slate-700 text-center text-xs text-slate-400">' +
-                        '<div class="font-mono text-[10px] uppercase text-amber-400 mb-1">' + label + '</div>Por definir' +
+                        '<div class="font-mono text-[10px] uppercase text-amber-400 mb-1">' + label + '</div>Se genera automáticamente al finalizar las Semifinales' +
                     '</div>';
                 }
                 var h = findTeam(matchObj.homeId);
                 var a = findTeam(matchObj.awayId);
+                var hasPen = (matchObj.homePenalties !== null && matchObj.homePenalties !== undefined && matchObj.awayPenalties !== null && matchObj.awayPenalties !== undefined);
                 return '<div onclick="openMatchReportModal(\'' + matchObj.id + '\')" class="p-3.5 rounded-2xl bg-slate-900 border border-amber-500/40 cursor-pointer space-y-2">' +
                     '<div class="flex items-center justify-between text-[10px] font-mono">' +
                         '<span class="text-amber-400 font-black uppercase">' + label + '</span>' +
-                        '<span class="text-emerald-400 font-bold">' + (matchObj.status === 'scheduled' ? matchObj.date : (matchObj.status === 'live' ? 'EN VIVO' : 'FINAL')) + '</span>' +
+                        renderMatchStatusBadgeHtml(matchObj) +
                     '</div>' +
                     '<div class="flex items-center justify-between text-xs font-bold text-white">' +
-                        '<span>' + h.name + '</span><span class="font-mono text-sm text-emerald-400">' + (matchObj.status === 'scheduled' ? '—' : matchObj.homeScore) + '</span>' +
+                        '<span>' + h.name + '</span>' +
+                        '<span class="font-mono text-sm text-emerald-400">' +
+                            (matchObj.status === 'scheduled' ? '—' : matchObj.homeScore) +
+                            (hasPen ? ' <span class="text-[10px] text-purple-300">(' + matchObj.homePenalties + ')</span>' : '') +
+                        '</span>' +
                     '</div>' +
                     '<div class="flex items-center justify-between text-xs font-bold text-white">' +
-                        '<span>' + a.name + '</span><span class="font-mono text-sm text-emerald-400">' + (matchObj.status === 'scheduled' ? '—' : matchObj.awayScore) + '</span>' +
+                        '<span>' + a.name + '</span>' +
+                        '<span class="font-mono text-sm text-emerald-400">' +
+                            (matchObj.status === 'scheduled' ? '—' : matchObj.awayScore) +
+                            (hasPen ? ' <span class="text-[10px] text-purple-300">(' + matchObj.awayPenalties + ')</span>' : '') +
+                        '</span>' +
                     '</div>' +
                 '</div>';
             }
@@ -4691,7 +5162,7 @@
             return '<div class="glass-panel p-5 border border-amber-500/40 space-y-3 mb-5">' +
                 '<div class="flex flex-wrap items-center justify-between gap-2">' +
                     '<div>' +
-                        '<span class="text-[10px] font-mono uppercase text-amber-400 font-bold">Fase Eliminatoria Directa</span>' +
+                        '<span class="text-[10px] font-mono uppercase text-amber-400 font-bold">Fase Eliminatoria Directa • Gran Final Automática</span>' +
                         '<h3 class="text-base font-black text-white m-0">🏆 Cuadro Oficial de Playoffs — Liga F7 Caracas</h3>' +
                     '</div>' +
                 '</div>' +
@@ -4722,7 +5193,8 @@
                     var mvpId = matchObj.mvpPlayerId;
                     if (mvpId) mvpCounts[mvpId] = (mvpCounts[mvpId] || 0) + 1;
 
-                    if (matchObj.status === 'finished' || matchObj.status === 'live') {
+                    // Si el partido fue ganado por Forfeit (inasistencia), NO cuenta como partido atajado ni goles recibidos para el portero
+                    if ((matchObj.status === 'finished' || matchObj.status === 'live') && !matchObj.forfeitWinnerId) {
                         teamPjMap[matchObj.homeId] = (teamPjMap[matchObj.homeId] || 0) + 1;
                         teamPjMap[matchObj.awayId] = (teamPjMap[matchObj.awayId] || 0) + 1;
                         teamGoalsAgainstFallback[matchObj.homeId] = (teamGoalsAgainstFallback[matchObj.homeId] || 0) + (matchObj.awayScore || 0);
@@ -4998,8 +5470,11 @@
             var created = 0;
             var timeSlots = ['19:00', '20:15', '21:30', '22:30'];
 
+            // PRIMERA VUELTA (IDA)
+            var firstLegRounds = [];
             for (var r = 0; r < rounds; r++) {
                 var slotIdx = 0;
+                var roundPairings = [];
                 for (var i = 0; i < half; i++) {
                     var h = list[i];
                     var a = list[list.length - 1 - i];
@@ -5008,10 +5483,11 @@
                         var matchHour = timeSlots[slotIdx % timeSlots.length];
                         var pitchNum = (slotIdx % 2) + 1;
                         slotIdx++;
+                        roundPairings.push({ h: h, a: a, matchHour: matchHour, pitchNum: pitchNum });
                         db.matches.push({
                             id: 'm-' + Date.now() + '-' + created,
                             tournamentId: t.id,
-                            round: 'Jornada ' + (r + 1),
+                            round: 'Jornada ' + (r + 1) + ' (Ida)',
                             homeId: h,
                             awayId: a,
                             homeScore: 0,
@@ -5024,7 +5500,31 @@
                         });
                     }
                 }
+                firstLegRounds.push(roundPairings);
                 list.splice(1, 0, list.pop());
+            }
+
+            // SEGUNDA VUELTA (VUELTA — Localía invertida)
+            for (var r2 = 0; r2 < firstLegRounds.length; r2++) {
+                var pairings = firstLegRounds[r2];
+                for (var j = 0; j < pairings.length; j++) {
+                    var pm = pairings[j];
+                    created++;
+                    db.matches.push({
+                        id: 'm-' + Date.now() + '-' + created,
+                        tournamentId: t.id,
+                        round: 'Jornada ' + (rounds + r2 + 1) + ' (Vuelta)',
+                        homeId: pm.a,
+                        awayId: pm.h,
+                        homeScore: 0,
+                        awayScore: 0,
+                        status: 'scheduled',
+                        period: '1T',
+                        minute: 0,
+                        date: t.startDate + ' • ' + pm.matchHour,
+                        pitch: 'Cancha ' + pm.pitchNum + ' (' + t.pitchSize + ')'
+                    });
+                }
             }
 
             t.status = 'active';
@@ -5033,7 +5533,7 @@
             saveDB();
             renderViewport();
             apiRequest('POST', '/api/tournaments/' + tourneyId + '/generate-fixture');
-            notify('⚡ Calendario completo generado: ' + created + ' partidos (' + rounds + ' jornadas) con los ' + t.teamIds.length + ' equipos');
+            notify('⚡ Calendario Ida y Vuelta generado: ' + created + ' partidos (' + (rounds * 2) + ' jornadas) con los ' + t.teamIds.length + ' equipos');
         }
 
         // =========================================================================
@@ -5060,7 +5560,7 @@
                     '<div class="text-xs text-slate-400">No hay partidos generados todavía para este torneo.</div>' +
                     (db.currentUser && db.currentUser.role === 'admin'
                         ? '<div class="flex flex-wrap justify-center gap-2">' +
-                            '<button onclick="generateTourneyFixture(\'' + tourneyId + '\')" class="btn-primary-gradient px-5 py-2.5 text-xs font-black">⚡ Generar Calendario Automático Ahora</button>' +
+                            '<button onclick="generateTourneyFixture(\'' + tourneyId + '\')" class="btn-primary-gradient px-5 py-2.5 text-xs font-black">⚡ Generar Calendario Ida y Vuelta Ahora</button>' +
                             '<button onclick="openCreateManualMatchModal(\'' + tourneyId + '\')" class="px-4 py-2.5 rounded-xl bg-slate-900 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">➕ Programar Partido Manual</button>' +
                           '</div>'
                         : '') +
@@ -5082,27 +5582,28 @@
                     var item = rMatches[j];
                     var h = findTeam(item.homeId);
                     var a = findTeam(item.awayId);
-                    cards += '<div onclick="openMatchReportModal(\'' + item.id + '\')" class="glass-panel p-4 border border-slate-800 hover:border-emerald-500/40 cursor-pointer space-y-2.5">' +
+                    cards += '<div onclick="openMatchReportModal(\'' + item.id + '\')" class="glass-panel p-4 border ' + (item.status === 'suspended' ? 'border-rose-500/50' : 'border-slate-800') + ' hover:border-emerald-500/40 cursor-pointer space-y-2.5">' +
                         '<div class="flex items-center justify-between text-[11px] font-mono">' +
                             '<span class="text-cyan-400 font-bold">' + item.date + ' • ' + item.pitch + '</span>' +
-                            '<span class="px-2 py-0.5 rounded font-bold ' + (item.status === 'live' ? 'bg-emerald-500/20 text-emerald-400' : item.status === 'finished' ? 'bg-slate-800 text-slate-300' : 'bg-amber-500/20 text-amber-300') + '">' +
-                                (item.status === 'live' ? ('🔴 EN VIVO ' + item.minute + '\'') : item.status === 'finished' ? 'FINALIZADO' : 'PROGRAMADO') +
-                            '</span>' +
+                            renderMatchStatusBadgeHtml(item) +
                         '</div>' +
                         '<div class="grid grid-cols-3 items-center text-center py-1">' +
                             '<div class="text-left font-bold text-xs sm:text-sm text-white flex items-center gap-2">' +
                                 '<span class="w-6 h-6 rounded-lg flex items-center justify-center font-black text-slate-950 text-[10px] shrink-0" style="background:' + h.color + '">' + h.shortName + '</span>' +
                                 '<span>' + h.name + '</span>' +
                             '</div>' +
-                            '<div class="font-mono text-lg font-black text-white">' + (item.status === 'scheduled' ? 'VS' : (item.homeScore + ' : ' + item.awayScore)) + '</div>' +
+                            '<div class="font-mono text-lg font-black text-white">' + renderMatchScoreTextHtml(item) + '</div>' +
                             '<div class="text-right font-bold text-xs sm:text-sm text-white flex items-center justify-end gap-2">' +
                                 '<span>' + a.name + '</span>' +
                                 '<span class="w-6 h-6 rounded-lg flex items-center justify-center font-black text-slate-950 text-[10px] shrink-0" style="background:' + a.color + '">' + a.shortName + '</span>' +
                             '</div>' +
                         '</div>' +
+                        (item.status === 'suspended'
+                            ? '<div class="p-2 rounded-xl bg-rose-500/15 border border-rose-500/30 text-[11px] text-rose-300 font-bold">🌧️ Suspendido: ' + (item.suspensionReason || 'Lluvia / Fuerza mayor') + (db.currentUser && db.currentUser.role === 'admin' ? ' — Pulsa "📅 Reprogramar Fecha / Hora" abajo' : '') + '</div>'
+                            : '') +
                         '<div class="flex items-center justify-between pt-1">' +
                             (db.currentUser && db.currentUser.role === 'admin'
-                                ? '<button onclick="event.stopPropagation(); openEditMatchScheduleModal(\'' + item.id + '\')" class="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 text-[11px] font-bold cursor-pointer">✏️ Editar Fecha / Cancha</button>'
+                                ? '<button onclick="event.stopPropagation(); openEditMatchScheduleModal(\'' + item.id + '\')" class="px-2.5 py-1 rounded-lg ' + (item.status === 'suspended' ? 'bg-amber-500 text-slate-950 font-black' : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 font-bold') + ' text-[11px] cursor-pointer">' + (item.status === 'suspended' ? '📅 Reprogramar Fecha / Hora' : '✏️ Editar Fecha / Cancha') + '</button>'
                                 : '<span></span>') +
                             '<div class="text-[11px] text-emerald-400 font-bold text-right">📄 Ver Acta / Eventos →</div>' +
                         '</div>' +
@@ -5186,6 +5687,7 @@
             if (db.currentUser.role === 'referee') {
                 if (refFilter === 'live') return '/arbitro/en-vivo';
                 if (refFilter === 'scheduled') return '/arbitro/por-jugar';
+                if (refFilter === 'suspended') return '/arbitro/suspendidos';
                 if (refFilter === 'finished') return '/arbitro/finalizados';
                 return '/arbitro';
             }
@@ -5283,6 +5785,7 @@
                 } else if (rawPath.indexOf('/arbitro') === 0 && db.currentUser && db.currentUser.role === 'referee') {
                     if (rawPath === '/arbitro/en-vivo') refFilter = 'live';
                     else if (rawPath === '/arbitro/por-jugar') refFilter = 'scheduled';
+                    else if (rawPath === '/arbitro/suspendidos') refFilter = 'suspended';
                     else if (rawPath === '/arbitro/finalizados') refFilter = 'finished';
                     else refFilter = 'all';
                 }
@@ -5311,6 +5814,7 @@
                 '/arbitro': '⚖️ Consola Oficial de Arbitraje',
                 '/arbitro/en-vivo': '🔴 Arbitraje — Partidos En Vivo',
                 '/arbitro/por-jugar': '📅 Arbitraje — Partidos Programados',
+                '/arbitro/suspendidos': '🌧️ Arbitraje — Partidos Suspendidos',
                 '/arbitro/finalizados': '🏁 Arbitraje — Partidos Finalizados',
                 '/admin/torneos': '🏆 Gestión de Torneos & Playoffs',
                 '/admin/auditoria': '🛡️ Clubes Afiliados & Auditoría Documental',
