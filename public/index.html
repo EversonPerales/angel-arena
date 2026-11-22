@@ -370,6 +370,7 @@
                                 var py = db.payments[pyIdx];
                                 lightPayments.push({
                                     id: py.id, teamId: py.teamId, tournamentId: py.tournamentId,
+                                    matchId: py.matchId || null,
                                     concept: py.concept, amount: py.amount, method: py.method,
                                     reference: py.reference, date: py.date, status: py.status,
                                     hasReceiptDoc: Boolean(py.hasReceiptDoc || py.receiptDoc)
@@ -1653,6 +1654,7 @@
                 pitchMode: mode,
                 formation: mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1'
             });
+            var prevActiveId = activeClubTeamId;
             activeClubTeamId = tempId;
             closeGlobalModal();
             saveDB();
@@ -1668,8 +1670,13 @@
                     activeClubTeamId = data.teamId;
                     renderViewport();
                 }
+                notify('🎉 Sub-equipo "' + name + '" (' + category + ') creado correctamente');
+            }, function() {
+                db.teams = db.teams.filter(function(t) { return t.id !== tempId; });
+                activeClubTeamId = prevActiveId;
+                saveDB();
+                renderViewport();
             });
-            notify('🎉 Sub-equipo "' + name + '" (' + category + ') creado correctamente');
         }
 
         function handleDeleteSubTeam(subTeamId) {
@@ -4166,7 +4173,7 @@
                                     ? '<div class="mt-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/40 font-mono text-xs font-black inline-block">🎯 Penales: ' + activeMatch.homePenalties + ' - ' + activeMatch.awayPenalties + '</div>'
                                     : '') +
                                 (activeMatch.forfeitWinnerId
-                                    ? '<div class="mt-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono text-xs font-black inline-block">🏳️ Ganó por Forfeit: ' + findTeam(activeMatch.forfeitWinnerId).shortName + '</div>'
+                                    ? '<div class="mt-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono text-xs font-black inline-block">🏳️ Ganó por Forfeit: ' + (findTeam(activeMatch.forfeitWinnerId) ? findTeam(activeMatch.forfeitWinnerId).shortName : 'Ganador') + '</div>'
                                     : '') +
                             '</div>' +
                             '<div>' +
@@ -4390,7 +4397,9 @@
                     pitch: 'Estadio Principal (' + (t ? t.pitchSize : '7v7') + ')'
                 });
             }
-            notify('👑 ¡Semifinales completadas! Gran Final generada automáticamente: ' + findTeam(finalistA).name + ' vs ' + findTeam(finalistB).name);
+            var finA = findTeam(finalistA);
+            var finB = findTeam(finalistB);
+            notify('👑 ¡Semifinales completadas! Gran Final generada automáticamente: ' + (finA ? finA.name : 'Finalista 1') + ' vs ' + (finB ? finB.name : 'Finalista 2'));
         }
 
         function refSetMatchState(matchId, newState) {
@@ -5497,14 +5506,18 @@
                 '¿Estás seguro de que deseas eliminar el club <strong>' + clubName + '</strong>? Se borrarán también sus equipos, jugadores, cuerpo técnico, partidos, pagos y credenciales de acceso. Esta acción no se puede deshacer.',
                 'Sí, Eliminar Club',
                 function() {
-                    db.teams = db.teams.filter(function(t) { return t.id !== teamId && t.parentTeamId !== teamId; });
-                    db.players = db.players.filter(function(p) { return p.teamId !== teamId; });
-                    if (db.staff) db.staff = db.staff.filter(function(s) { return s.teamId !== teamId; });
-                    if (db.payments) db.payments = db.payments.filter(function(py) { return py.teamId !== teamId; });
-                    db.accounts = db.accounts.filter(function(a) { return a.teamId !== teamId; });
-                    db.matches = db.matches.filter(function(m) { return m.homeId !== teamId && m.awayId !== teamId; });
+                    var removedIds = [teamId];
+                    for (var r = 0; r < db.teams.length; r++) {
+                        if (db.teams[r].parentTeamId === teamId) removedIds.push(db.teams[r].id);
+                    }
+                    db.teams = db.teams.filter(function(t) { return removedIds.indexOf(t.id) === -1; });
+                    db.players = db.players.filter(function(p) { return removedIds.indexOf(p.teamId) === -1; });
+                    if (db.staff) db.staff = db.staff.filter(function(s) { return removedIds.indexOf(s.teamId) === -1; });
+                    if (db.payments) db.payments = db.payments.filter(function(py) { return removedIds.indexOf(py.teamId) === -1; });
+                    db.accounts = db.accounts.filter(function(a) { return removedIds.indexOf(a.teamId) === -1; });
+                    db.matches = db.matches.filter(function(m) { return removedIds.indexOf(m.homeId) === -1 && removedIds.indexOf(m.awayId) === -1; });
                     for (var i = 0; i < db.tournaments.length; i++) {
-                        db.tournaments[i].teamIds = db.tournaments[i].teamIds.filter(function(id) { return id !== teamId; });
+                        db.tournaments[i].teamIds = db.tournaments[i].teamIds.filter(function(id) { return removedIds.indexOf(id) === -1; });
                     }
                     selectedAuditClubId = db.teams.length > 0 ? db.teams[0].id : '';
                     saveDB();
@@ -5624,6 +5637,9 @@
                 'Sí, Eliminar Partido',
                 function() {
                     db.matches = db.matches.filter(function(m) { return m.id !== matchId; });
+                    if (db.payments) {
+                        db.payments = db.payments.filter(function(py) { return !(py.matchId === matchId && py.status === 'unpaid'); });
+                    }
                     saveDB();
                     renderViewport();
                     apiRequest('DELETE', '/api/matches/' + matchId);
@@ -5635,13 +5651,34 @@
         function openCreateManualMatchModal(tourneyId) {
             var t = findTournament(tourneyId);
             if (!t) return;
-            if (!db.teams || db.teams.length < 2) {
-                notify('⚠️ Debes registrar al menos 2 clubes antes de programar un partido manual.');
+            var eligibleTeams = [];
+            var enrolledIds = t.teamIds || [];
+            if (enrolledIds.length >= 2) {
+                for (var eIdx = 0; eIdx < enrolledIds.length; eIdx++) {
+                    var enTm = findTeam(enrolledIds[eIdx]);
+                    if (enTm) eligibleTeams.push(enTm);
+                }
+            }
+            if (eligibleTeams.length < 2) {
+                eligibleTeams = [];
+                for (var i = 0; i < db.teams.length; i++) {
+                    var cand = db.teams[i];
+                    if (cand.parentTeamId && (!t.category || cand.category === t.category)) {
+                        eligibleTeams.push(cand);
+                    }
+                }
+            }
+            if (eligibleTeams.length < 2) {
+                eligibleTeams = db.teams.slice();
+            }
+            if (eligibleTeams.length < 2) {
+                notify('⚠️ Debes tener al menos 2 equipos registrados antes de programar un partido manual.');
                 return;
             }
             var teamOpts = '';
-            for (var i = 0; i < db.teams.length; i++) {
-                teamOpts += '<option value="' + db.teams[i].id + '">' + db.teams[i].name + ' (' + db.teams[i].shortName + ')</option>';
+            for (var optIdx = 0; optIdx < eligibleTeams.length; optIdx++) {
+                var tmOpt = eligibleTeams[optIdx];
+                teamOpts += '<option value="' + tmOpt.id + '">' + tmOpt.name + ' (' + tmOpt.shortName + (tmOpt.category ? ' • ' + tmOpt.category : '') + ')</option>';
             }
 
             var modal = document.getElementById('global-modal');
@@ -5732,7 +5769,9 @@
                 date: date,
                 pitch: pitch
             });
-            notify('✅ Partido programado: ' + findTeam(homeId).name + ' vs ' + findTeam(awayId).name);
+            var hm = findTeam(homeId);
+            var aw = findTeam(awayId);
+            notify('✅ Partido programado: ' + (hm ? hm.name : 'Local') + ' vs ' + (aw ? aw.name : 'Visitante'));
         }
 
         function openAdminSecurityModal() {

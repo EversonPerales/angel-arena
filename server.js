@@ -669,8 +669,11 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    const { email, password } = req.body;
-    const userRes = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Debes ingresar tu correo y contraseña.' });
+    }
+    const userRes = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [String(email).trim()]);
     if (userRes.rows.length === 0) {
       recordLoginFailure(clientIp);
       return res.status(401).json({ error: 'Credenciales inválidas' });
@@ -873,7 +876,11 @@ app.post('/api/teams/subteams', authenticateToken, authorizeRoles('club'), async
       state
     });
   } catch (err) {
-    res.status(400).json({ error: 'Ya existe un equipo o categoría con ese nombre.' });
+    console.error('Error en /api/teams/subteams:', err.message);
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'Ya existe un equipo o categoría con ese mismo nombre.' });
+    }
+    res.status(400).json({ error: err.message || 'No se pudo crear el sub-equipo.' });
   }
 });
 
@@ -1387,6 +1394,7 @@ app.post('/api/matches', authenticateToken, authorizeRoles('admin'), async (req,
 app.delete('/api/matches/:matchId', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   try {
     const matchId = parseId(req.params.matchId);
+    await pool.query("DELETE FROM club_payments WHERE match_id = $1 AND status = 'unpaid'", [matchId]);
     await pool.query('DELETE FROM matches WHERE id = $1', [matchId]);
     const state = await broadcastState();
     res.json({ message: 'Partido eliminado del calendario.', state });
@@ -1499,8 +1507,12 @@ app.delete('/api/staff/:staffId', authenticateToken, authorizeRoles('club'), asy
 // ==========================================
 app.post('/api/tournaments', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   const client = await pool.connect();
+  let newTourneyId = null;
   try {
-    const { name, pitchSize, category, maxTeams, startDate, prize, registrationFee, refereeFee } = req.body;
+    const { name, pitchSize, category, maxTeams, startDate, prize, registrationFee, refereeFee } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'El nombre del torneo es obligatorio.' });
+    }
     const cleanSize = pitchSize === '11v11' ? '11v11' : pitchSize === '7v7' ? '7v7' : '5v5';
     const formatText = category ? `Liga + Playoffs (${category})` : 'Liga + Playoffs';
     const limitTeams = Number(maxTeams) || 8;
@@ -1512,22 +1524,29 @@ app.post('/api/tournaments', authenticateToken, authorizeRoles('admin'), async (
     const ins = await client.query(
       `INSERT INTO tournaments (name, format, category_label, pitch_size, max_teams, start_date, prize, registration_fee, referee_fee, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open') RETURNING id`,
-      [name, formatText, cleanCategory, cleanSize, limitTeams, startDate, prize, regFeeText, refFeeText]
+      [String(name).trim(), formatText, cleanCategory, cleanSize, limitTeams, startDate || 'Por definir', prize || '', regFeeText, refFeeText]
     );
-    const newTourneyId = ins.rows[0].id;
+    newTourneyId = ins.rows[0].id;
     await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
 
+  try {
     const state = await broadcastState();
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Torneo creado y publicado sin equipos pre-inscritos.',
       tournamentId: 'tour-' + newTourneyId,
       state
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
+    return res.status(201).json({
+      message: 'Torneo creado y publicado sin equipos pre-inscritos.',
+      tournamentId: 'tour-' + newTourneyId
+    });
   }
 });
 
