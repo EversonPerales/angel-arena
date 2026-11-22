@@ -485,7 +485,7 @@
                 .catch(function() {});
         }
 
-        function apiRequest(method, url, body, onSuccess) {
+        function apiRequest(method, url, body, onSuccess, onError) {
             if (typeof window.fetch !== 'function' || window.location.protocol === 'file:') return;
             var headers = { 'Content-Type': 'application/json' };
             if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
@@ -498,7 +498,9 @@
             .then(function(res) {
                 if (res.status === 401 || res.status === 403) {
                     return res.json().then(function(errData) {
-                        notify('⚠️ ' + ((errData && errData.error) || 'Sesión expirada. Inicia sesión nuevamente.'));
+                        var msg = (errData && errData.error) || 'Sesión expirada. Inicia sesión nuevamente.';
+                        notify('⚠️ ' + msg);
+                        if (typeof onError === 'function') onError(msg, res.status);
                         if (res.status === 401) {
                             logoutSession();
                         }
@@ -507,7 +509,9 @@
                 }
                 if (!res.ok) {
                     return res.json().then(function(errData) {
-                        if (errData && errData.error) notify('⚠️ ' + errData.error);
+                        var msg = (errData && errData.error) || 'Error en la operación (' + res.status + ').';
+                        notify('⚠️ ' + msg);
+                        if (typeof onError === 'function') onError(msg, res.status);
                         return null;
                     });
                 }
@@ -518,7 +522,9 @@
                 if (data.state) applyServerState(data.state, true);
                 if (typeof onSuccess === 'function') onSuccess(data);
             })
-            .catch(function() {});
+            .catch(function() {
+                if (typeof onError === 'function') onError('Error de conexión con el servidor.', 0);
+            });
         }
 
         function initRealtimeSync() {
@@ -803,13 +809,19 @@
                     selectedPitchStarterId = null;
                     saveDB();
                     syncSocketAuthRoom();
+                    renderViewport();
                     window.fetch('/api/state?t=' + Date.now(), {
                         cache: 'no-store',
                         headers: { 'Authorization': 'Bearer ' + authToken }
                     })
-                        .then(function(r) { return r.ok ? r.json() : null; })
+                        .then(function(r) {
+                            if (!r.ok) return null;
+                            var etag = r.headers.get('ETag');
+                            if (etag) lastStateEtag = etag;
+                            return r.json();
+                        })
                         .then(function(st) {
-                            if (st) applyServerState(st);
+                            if (st) applyServerState(st, true);
                             else renderViewport();
                         })
                         .catch(function() { renderViewport(); });
@@ -938,7 +950,8 @@
                                 '<input type="text" id="reg-club-pass" required placeholder="Ej: caracas2027" class="fallback-input font-mono">' +
                             '</div>' +
                         '</div>' +
-                        '<button type="submit" class="btn-primary-gradient w-full py-3 text-xs sm:text-sm font-black">✅ Registrar Club y Generar Ficha de Credenciales</button>' +
+                        '<div id="reg-club-error" class="hidden p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs font-bold"></div>' +
+                        '<button type="submit" id="reg-club-submit-btn" class="btn-primary-gradient w-full py-3 text-xs sm:text-sm font-black">✅ Registrar Club y Generar Ficha de Credenciales</button>' +
                     '</form>' +
                 '</div>';
             modal.style.display = 'flex';
@@ -968,55 +981,10 @@
             }
         }
 
-        function handleCreateNewClub(e) {
-            e.preventDefault();
-            if (!db.currentUser || db.currentUser.role !== 'admin') {
-                notify('🔒 Acción permitida únicamente al Organizador General.');
-                return;
-            }
-            var name = document.getElementById('reg-club-name').value.trim();
-            var shortName = document.getElementById('reg-club-short').value.trim().toUpperCase() || 'CLB';
-            var mode = document.getElementById('reg-club-mode').value || '5v5';
-            var coach = document.getElementById('reg-club-coach').value.trim();
-            var email = document.getElementById('reg-club-email').value.trim().toLowerCase();
-            var pass = document.getElementById('reg-club-pass').value.trim();
-
-            var newTeamId = 'team-' + Date.now();
-
-            db.teams.push({
-                id: newTeamId,
-                name: name,
-                shortName: shortName,
-                coach: coach,
-                email: email,
-                color: '#10B981',
-                pitchMode: mode,
-                formation: mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1'
-            });
-
-            db.accounts.push({ email: email, pass: pass, role: 'club', name: coach, teamId: newTeamId });
-            selectedAuditClubId = newTeamId;
-            lastCreatedClubCreds = { name: name, shortName: shortName, mode: mode, coach: coach, email: email, pass: pass };
-
-            saveDB();
-            renderViewport();
-            apiRequest('POST', '/api/auth/register-club', {
-                clubName: name,
-                shortName: shortName,
-                coachName: coach,
-                pitchMode: mode,
-                primaryColor: '#10B981',
-                email: email,
-                password: pass
-            }, function(data) {
-                if (data && data.teamId) {
-                    selectedAuditClubId = data.teamId;
-                    renderViewport();
-                }
-            });
-
+        function showCreatedClubCredentialsModal(name, shortName, mode, coach, email, pass) {
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
+            if (!modal || !body) return;
             body.innerHTML = '' +
                 '<div class="space-y-4">' +
                     '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
@@ -1038,6 +1006,76 @@
                     '</div>' +
                 '</div>';
             modal.style.display = 'flex';
+        }
+
+        function handleCreateNewClub(e) {
+            e.preventDefault();
+            if (!db.currentUser || db.currentUser.role !== 'admin') {
+                notify('🔒 Acción permitida únicamente al Organizador General.');
+                return;
+            }
+            var name = document.getElementById('reg-club-name').value.trim();
+            var shortName = document.getElementById('reg-club-short').value.trim().toUpperCase() || 'CLB';
+            var mode = document.getElementById('reg-club-mode').value || '7v7';
+            var coach = document.getElementById('reg-club-coach').value.trim();
+            var email = document.getElementById('reg-club-email').value.trim().toLowerCase();
+            var pass = document.getElementById('reg-club-pass').value.trim();
+
+            var errBox = document.getElementById('reg-club-error');
+            var submitBtn = document.getElementById('reg-club-submit-btn');
+            if (errBox) { errBox.textContent = ''; errBox.classList.add('hidden'); }
+
+            lastCreatedClubCreds = { name: name, shortName: shortName, mode: mode, coach: coach, email: email, pass: pass };
+
+            if (typeof window.fetch === 'function' && window.location.protocol !== 'file:') {
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = '⏳ Registrando club...';
+                }
+                apiRequest('POST', '/api/auth/register-club', {
+                    clubName: name,
+                    shortName: shortName,
+                    coachName: coach,
+                    pitchMode: mode,
+                    primaryColor: '#10B981',
+                    email: email,
+                    password: pass
+                }, function(data) {
+                    if (data && data.teamId) {
+                        selectedAuditClubId = data.teamId;
+                        renderViewport();
+                    }
+                    showCreatedClubCredentialsModal(name, shortName, mode, coach, email, pass);
+                    notify('🎉 Club ' + name + ' dado de alta oficialmente');
+                }, function(errMsg) {
+                    if (submitBtn) {
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = '✅ Registrar Club y Generar Ficha de Credenciales';
+                    }
+                    if (errBox) {
+                        errBox.textContent = '⚠️ ' + errMsg;
+                        errBox.classList.remove('hidden');
+                    }
+                });
+                return;
+            }
+
+            var newTeamId = 'team-' + Date.now();
+            db.teams.push({
+                id: newTeamId,
+                name: name,
+                shortName: shortName,
+                coach: coach,
+                email: email,
+                color: '#10B981',
+                pitchMode: mode,
+                formation: mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1'
+            });
+            db.accounts.push({ email: email, pass: pass, role: 'club', name: coach, teamId: newTeamId });
+            selectedAuditClubId = newTeamId;
+            saveDB();
+            renderViewport();
+            showCreatedClubCredentialsModal(name, shortName, mode, coach, email, pass);
             notify('🎉 Club ' + name + ' dado de alta oficialmente');
         }
 

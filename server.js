@@ -442,9 +442,9 @@ function sendCachedStateResponse(req, res, entry, isAuth) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   if (acceptEncoding.includes('gzip')) {
     res.setHeader('Content-Encoding', 'gzip');
-    return res.send(isAuth ? entry.fullGzip : entry.publicGzip);
+    return res.end(isAuth ? entry.fullGzip : entry.publicGzip);
   }
-  return res.send(isAuth ? entry.fullJson : entry.publicJson);
+  return res.end(isAuth ? entry.fullJson : entry.publicJson);
 }
 
 async function broadcastState() {
@@ -722,28 +722,33 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/register-club', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
+  const { clubName, shortName, coachName, pitchMode, primaryColor, email, password } = req.body;
+  if (!clubName || !coachName || !email || !password) {
+    return res.status(400).json({ error: 'Todos los campos del club (nombre, responsable, correo y contraseña) son obligatorios.' });
+  }
   const client = await pool.connect();
+  let numericTeamId = null;
+  let newUser = null;
   try {
-    const { clubName, shortName, coachName, pitchMode, primaryColor, email, password } = req.body;
     await client.query('BEGIN');
 
-    const hash = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(String(password).trim(), 10);
     const userIns = await client.query(
       `INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, 'club') RETURNING id, name, email, role`,
-      [coachName, email.trim().toLowerCase(), hash]
+      [String(coachName).trim(), String(email).trim().toLowerCase(), hash]
     );
-    const newUser = userIns.rows[0];
+    newUser = userIns.rows[0];
 
     const mode = pitchMode === '11v11' ? '11v11' : pitchMode === '7v7' ? '7v7' : '5v5';
     const defaultFormation = mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1';
-    const cleanShort = (shortName || clubName.substring(0, 3) || 'CLB').toUpperCase().substring(0, 5);
+    const cleanShort = (shortName || String(clubName).substring(0, 3) || 'CLB').toUpperCase().substring(0, 5);
 
     const teamIns = await client.query(
       `INSERT INTO teams (name, short_name, coach_name, owner_id, primary_color, pitch_mode, formation)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [clubName, cleanShort, coachName, newUser.id, primaryColor || '#10B981', mode, defaultFormation]
+      [String(clubName).trim(), cleanShort, String(coachName).trim(), newUser.id, primaryColor || '#10B981', mode, defaultFormation]
     );
-    const numericTeamId = teamIns.rows[0].id;
+    numericTeamId = teamIns.rows[0].id;
 
     await client.query(
       'INSERT INTO audit_logs (actor_email, actor_role, action_detail) VALUES ($1, $2, $3)',
@@ -751,9 +756,24 @@ app.post('/api/auth/register-club', authenticateToken, authorizeRoles('admin'), 
     );
 
     await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('Error en /api/auth/register-club:', err.message);
+    if (err.code === '23505') {
+      const detail = String(err.constraint || err.detail || '').toLowerCase();
+      if (detail.includes('email')) {
+        return res.status(400).json({ error: 'Ese correo de acceso ya está registrado en el sistema.' });
+      }
+      return res.status(400).json({ error: 'Ya existe un club registrado con ese mismo nombre.' });
+    }
+    return res.status(400).json({ error: err.message || 'No se pudo registrar el club.' });
+  } finally {
+    client.release();
+  }
 
+  try {
     const state = await broadcastState();
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Club registrado oficialmente por el administrador',
       teamId: 'team-' + numericTeamId,
       clubCredentials: {
@@ -764,10 +784,16 @@ app.post('/api/auth/register-club', authenticateToken, authorizeRoles('admin'), 
       state
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ error: 'El correo o nombre del club ya está registrado.' });
-  } finally {
-    client.release();
+    console.error('Error refrescando estado tras register-club:', err.message);
+    return res.status(201).json({
+      message: 'Club registrado oficialmente por el administrador',
+      teamId: 'team-' + numericTeamId,
+      clubCredentials: {
+        clubName,
+        coachName,
+        email: newUser.email
+      }
+    });
   }
 });
 
