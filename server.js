@@ -17,7 +17,9 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  pingInterval: 15000,
+  pingTimeout: 10000
 });
 
 // Conexión a PostgreSQL compatible con Coolify, Dokploy, Docker Compose y Railway
@@ -45,6 +47,15 @@ const JWT_SECRET = process.env.JWT_SECRET || 'clave_secreta_super_segura_cambiar
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Extrae el ID numérico tanto de 'team-1' / 'p-5' como de '1' / 1
@@ -98,6 +109,9 @@ async function initDatabase() {
       // Migraciones seguras por si las tablas ya existían de una versión previa
       await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS short_name VARCHAR(10) NOT NULL DEFAULT 'CLB'`);
       await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS logo_url TEXT`);
+      await client.query(`ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_owner_id_key`);
+      await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS parent_team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE`);
+      await client.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS category_label VARCHAR(50) DEFAULT 'Categoría Libre'`);
       await client.query(`ALTER TABLE teams ALTER COLUMN pitch_mode TYPE VARCHAR(10)`);
       await client.query(`ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_pitch_mode_check`);
       await client.query(`ALTER TABLE teams ADD CONSTRAINT teams_pitch_mode_check CHECK (pitch_mode IN ('5v5', '7v7', '11v11'))`);
@@ -124,6 +138,7 @@ async function initDatabase() {
       await client.query(`ALTER TABLE tournaments ALTER COLUMN start_date TYPE VARCHAR(40) USING start_date::text`);
       await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS registration_fee VARCHAR(50) DEFAULT '$150 USD'`);
       await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS referee_fee VARCHAR(50) DEFAULT '$20 USD'`);
+      await client.query(`ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS category_label VARCHAR(50) DEFAULT 'Categoría Libre'`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
       await client.query(`ALTER TABLE matches DROP CONSTRAINT IF EXISTS matches_status_check`);
       await client.query(`ALTER TABLE matches ADD CONSTRAINT matches_status_check CHECK (status IN ('scheduled', 'live', 'finished', 'suspended'))`);
@@ -132,6 +147,14 @@ async function initDatabase() {
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_penalties INTEGER DEFAULT NULL`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_penalties INTEGER DEFAULT NULL`);
       await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS penalties_log TEXT`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS clock_running BOOLEAN DEFAULT FALSE`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS clock_started_at BIGINT DEFAULT NULL`);
+      await client.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS clock_elapsed_sec INTEGER DEFAULT 0`);
+      await client.query(`ALTER TABLE club_payments ADD COLUMN IF NOT EXISTS match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE`);
+      await client.query(`ALTER TABLE club_payments ALTER COLUMN concept TYPE VARCHAR(160)`);
+      await client.query(`ALTER TABLE club_payments ALTER COLUMN payment_date TYPE VARCHAR(40)`);
+      await client.query(`ALTER TABLE club_payments DROP CONSTRAINT IF EXISTS club_payments_status_check`);
+      await client.query(`ALTER TABLE club_payments ADD CONSTRAINT club_payments_status_check CHECK (status IN ('unpaid', 'pending', 'approved', 'rejected'))`);
       await client.query(`ALTER TABLE players ADD COLUMN IF NOT EXISTS goals_conceded INTEGER DEFAULT 0`);
       await client.query(`ALTER TABLE match_events ADD COLUMN IF NOT EXISTS conceded_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL`);
 
@@ -198,7 +221,7 @@ async function getFullState(clientOrPool = pool) {
       FROM club_staff ORDER BY team_id ASC, id ASC
     `),
     clientOrPool.query(`
-      SELECT id, team_id, tournament_id, concept, amount, method, reference, payment_date, status,
+      SELECT id, team_id, tournament_id, match_id, concept, amount, method, reference, payment_date, status,
              (receipt_doc IS NOT NULL AND receipt_doc <> '') AS has_receipt_doc
       FROM club_payments ORDER BY id DESC
     `),
@@ -220,21 +243,31 @@ async function getFullState(clientOrPool = pool) {
       name: rf.name,
       email: rf.email
     })),
-    tournaments: tournamentsRes.rows.map((t) => ({
-      id: 'tour-' + t.id,
-      name: t.name,
-      pitchSize: t.pitch_size,
-      format: t.format,
-      maxTeams: t.max_teams,
-      startDate: String(t.start_date),
-      prize: t.prize || '',
-      registrationFee: t.registration_fee || '$150 USD',
-      refereeFee: t.referee_fee || '$20 USD',
-      status: t.status,
-      teamIds: regsByTourney[t.id] || []
-    })),
+    tournaments: tournamentsRes.rows.map((t) => {
+      let inferredCat = t.category_label;
+      if (!inferredCat && t.format) {
+        const mFmt = String(t.format).match(/\(([^)]+)\)/);
+        if (mFmt) inferredCat = mFmt[1];
+      }
+      return {
+        id: 'tour-' + t.id,
+        name: t.name,
+        pitchSize: t.pitch_size,
+        category: inferredCat || 'Categoría Libre',
+        format: t.format,
+        maxTeams: t.max_teams,
+        startDate: String(t.start_date),
+        prize: t.prize || '',
+        registrationFee: t.registration_fee || '$150 USD',
+        refereeFee: t.referee_fee || '$20 USD',
+        status: t.status,
+        teamIds: regsByTourney[t.id] || []
+      };
+    }),
     teams: teamsRes.rows.map((tm) => ({
       id: 'team-' + tm.id,
+      parentTeamId: tm.parent_team_id ? 'team-' + tm.parent_team_id : null,
+      category: tm.category_label || 'Categoría Libre',
       name: tm.name,
       shortName: tm.short_name || tm.name.substring(0, 3).toUpperCase(),
       coach: tm.coach_name,
@@ -290,13 +323,14 @@ async function getFullState(clientOrPool = pool) {
       id: 'pay-' + py.id,
       teamId: 'team-' + py.team_id,
       tournamentId: py.tournament_id ? 'tour-' + py.tournament_id : 'tour-1',
+      matchId: py.match_id ? 'm-' + py.match_id : null,
       concept: py.concept,
       amount: py.amount,
-      method: py.method,
-      reference: py.reference,
+      method: py.method || 'Por pagar',
+      reference: py.reference || 'Sin comprobante',
       date: py.payment_date,
       hasReceiptDoc: Boolean(py.has_receipt_doc),
-      status: py.status || 'pending'
+      status: py.status || 'unpaid'
     })),
     matches: matchesRes.rows.map((m) => {
       let parsedPenLog = [];
@@ -318,6 +352,9 @@ async function getFullState(clientOrPool = pool) {
         status: m.status,
         period: m.period || '1T',
         minute: m.current_minute || 0,
+        clockRunning: Boolean(m.clock_running),
+        clockStartedAt: m.clock_started_at ? Number(m.clock_started_at) : null,
+        clockElapsedSec: m.clock_elapsed_sec ? Number(m.clock_elapsed_sec) : 0,
         date: m.match_date,
         pitch: m.pitch_name,
         mvpPlayerId: m.mvp_player_id ? 'p-' + m.mvp_player_id : null,
@@ -372,22 +409,95 @@ function authorizeRoles(...allowedRoles) {
 }
 
 // ==========================================
-// 0. ESTADO GLOBAL Y SALUD DEL SERVIDOR
+// 0. ESTADO GLOBAL, PRIVACIDAD Y SALUD DEL SERVIDOR
 // ==========================================
+function getOptionalUserFromReq(req) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (e) {
+    return null;
+  }
+}
+
+function sanitizeStateForVisitor(fullState, user) {
+  if (user && (user.role === 'admin' || user.role === 'referee' || user.role === 'club')) {
+    return fullState;
+  }
+  // Visitante sin login (Portal En Vivo / Verificador QR): ocultar correos, cédulas, teléfonos y pagos privados
+  return {
+    ...fullState,
+    referees: [],
+    payments: [],
+    teams: (fullState.teams || []).map((tm) => ({
+      ...tm,
+      email: ''
+    })),
+    players: (fullState.players || []).map((p) => ({
+      ...p,
+      idNumber: '',
+      repIdNumber: '',
+      specialConditionDetail: ''
+    })),
+    staff: (fullState.staff || []).map((s) => ({
+      ...s,
+      idNumber: '',
+      phone: ''
+    }))
+  };
+}
+
+// Limitador anti-fuerza bruta para /api/auth/login (máx. 12 intentos fallidos por IP en 15 min)
+const loginAttemptStore = new Map();
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const entry = loginAttemptStore.get(ip);
+  if (!entry || now - entry.firstAt > windowMs) {
+    return { blocked: false };
+  }
+  if (entry.count >= 12) {
+    const minsLeft = Math.max(1, Math.ceil((windowMs - (now - entry.firstAt)) / 60000));
+    return { blocked: true, minsLeft };
+  }
+  return { blocked: false };
+}
+
+function recordLoginFailure(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const entry = loginAttemptStore.get(ip);
+  if (!entry || now - entry.firstAt > windowMs) {
+    loginAttemptStore.set(ip, { count: 1, firstAt: now });
+  } else {
+    entry.count += 1;
+  }
+}
+
+function clearLoginFailures(ip) {
+  loginAttemptStore.delete(ip);
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, dbReady });
 });
 
-app.get('/api/players/:playerId/docs', async (req, res) => {
+app.get('/api/players/:playerId/docs', authenticateToken, authorizeRoles('admin', 'referee', 'club'), async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
     const playerId = parseId(req.params.playerId);
     const r = await pool.query(
-      'SELECT birth_cert_doc, player_id_doc, rep_id_doc, special_condition_doc FROM players WHERE id = $1',
+      'SELECT team_id, birth_cert_doc, player_id_doc, rep_id_doc, special_condition_doc FROM players WHERE id = $1',
       [playerId]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'Jugador no encontrado' });
     const row = r.rows[0];
+    if (req.user.role === 'club') {
+      const authTeamId = await resolveAuthorizedTeamId(req, row.team_id);
+      if (!authTeamId) return res.status(403).json({ error: 'No tienes permisos para ver documentos de otro club.' });
+    }
     res.json({
       birthCertDoc: row.birth_cert_doc || null,
       playerIdDoc: row.player_id_doc || null,
@@ -399,12 +509,16 @@ app.get('/api/players/:playerId/docs', async (req, res) => {
   }
 });
 
-app.get('/api/staff/:staffId/docs', async (req, res) => {
+app.get('/api/staff/:staffId/docs', authenticateToken, authorizeRoles('admin', 'club'), async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
     const staffId = parseId(req.params.staffId);
-    const r = await pool.query('SELECT id_doc, license_doc FROM club_staff WHERE id = $1', [staffId]);
+    const r = await pool.query('SELECT team_id, id_doc, license_doc FROM club_staff WHERE id = $1', [staffId]);
     if (r.rows.length === 0) return res.status(404).json({ error: 'Integrante no encontrado' });
+    if (req.user.role === 'club') {
+      const authTeamId = await resolveAuthorizedTeamId(req, r.rows[0].team_id);
+      if (!authTeamId) return res.status(403).json({ error: 'No tienes permisos para ver documentos de otro club.' });
+    }
     res.json({
       idDoc: r.rows[0].id_doc || null,
       licenseDoc: r.rows[0].license_doc || null
@@ -414,12 +528,16 @@ app.get('/api/staff/:staffId/docs', async (req, res) => {
   }
 });
 
-app.get('/api/payments/:paymentId/receipt', async (req, res) => {
+app.get('/api/payments/:paymentId/receipt', authenticateToken, authorizeRoles('admin', 'club'), async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
     const paymentId = parseId(req.params.paymentId);
-    const r = await pool.query('SELECT receipt_doc FROM club_payments WHERE id = $1', [paymentId]);
+    const r = await pool.query('SELECT team_id, receipt_doc FROM club_payments WHERE id = $1', [paymentId]);
     if (r.rows.length === 0) return res.status(404).json({ error: 'Pago no encontrado' });
+    if (req.user.role === 'club') {
+      const authTeamId = await resolveAuthorizedTeamId(req, r.rows[0].team_id);
+      if (!authTeamId) return res.status(403).json({ error: 'No tienes permisos para ver comprobantes de otro club.' });
+    }
     res.json({ receiptDoc: r.rows[0].receipt_doc || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -429,8 +547,9 @@ app.get('/api/payments/:paymentId/receipt', async (req, res) => {
 app.get('/api/state', async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
+    const user = getOptionalUserFromReq(req);
     const state = await getFullState();
-    res.json(state);
+    res.json(sanitizeStateForVisitor(state, user));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -464,18 +583,36 @@ app.post('/api/system/reset', authenticateToken, authorizeRoles('admin'), async 
 app.post('/api/auth/login', async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
+    const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const rateCheck = checkLoginRateLimit(clientIp);
+    if (rateCheck.blocked) {
+      return res.status(429).json({
+        error: `Demasiados intentos fallidos. Intenta de nuevo en ${rateCheck.minsLeft} minuto(s).`
+      });
+    }
+
     const { email, password } = req.body;
     const userRes = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
-    if (userRes.rows.length === 0) return res.status(401).json({ error: 'Credenciales inválidas' });
+    if (userRes.rows.length === 0) {
+      recordLoginFailure(clientIp);
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
 
     const user = userRes.rows[0];
     const validPass = await bcrypt.compare(password, user.password_hash);
-    if (!validPass) return res.status(401).json({ error: 'Credenciales inválidas' });
+    if (!validPass) {
+      recordLoginFailure(clientIp);
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+    clearLoginFailures(clientIp);
 
-    // Si es dueño de equipo, buscamos su club asignado
+    // Si es dueño de equipo, buscamos su club principal asignado
     let numericTeamId = null;
     if (user.role === 'club') {
-      const teamRes = await pool.query('SELECT id FROM teams WHERE owner_id = $1', [user.id]);
+      const teamRes = await pool.query(
+        'SELECT id FROM teams WHERE owner_id = $1 ORDER BY parent_team_id NULLS FIRST, id ASC LIMIT 1',
+        [user.id]
+      );
       if (teamRes.rows.length > 0) numericTeamId = teamRes.rows[0].id;
     }
 
@@ -557,26 +694,135 @@ app.post('/api/auth/register-club', authenticateToken, authorizeRoles('admin'), 
 });
 
 // ==========================================
+// HELPER: VERIFICAR PROPIEDAD DE CLUB / SUB-EQUIPO Y RANGO DE EDAD POR CATEGORÍA
+// ==========================================
+async function resolveAuthorizedTeamId(req, requestedTeamId, clientOrPool = pool) {
+  const rootTeamId = parseId(req.user.teamId);
+  if (!requestedTeamId) return rootTeamId;
+  const targetId = parseId(requestedTeamId);
+  if (!targetId || targetId === rootTeamId) return rootTeamId;
+
+  const check = await clientOrPool.query(
+    'SELECT id FROM teams WHERE id = $1 AND (id = $2 OR parent_team_id = $2 OR owner_id = $3)',
+    [targetId, rootTeamId, req.user.id]
+  );
+  if (check.rows.length === 0) return null;
+  return targetId;
+}
+
+function getCategoryAgeBounds(categoryLabel) {
+  const cat = String(categoryLabel || '').toLowerCase();
+  const subMatch = cat.match(/sub[-\s]?(\d{1,2})/);
+  if (subMatch) {
+    const maxAge = Number(subMatch[1]);
+    const minAge = Math.max(4, maxAge - 4);
+    return { minAge, maxAge, label: `Sub-${maxAge}` };
+  }
+  if (cat.includes('libre') || cat.includes('adult') || cat.includes('femenino')) {
+    return { minAge: 15, maxAge: 40, label: categoryLabel || 'Categoría Libre' };
+  }
+  return { minAge: 4, maxAge: 40, label: categoryLabel || 'General' };
+}
+
+// ==========================================
+// 1.5 SUB-EQUIPOS / CATEGORÍAS DENTRO DE UN MISMO CLUB
+// ==========================================
+app.post('/api/teams/subteams', authenticateToken, authorizeRoles('club'), async (req, res) => {
+  try {
+    const parentTeamId = parseId(req.user.teamId);
+    const { name, shortName, category, pitchMode, color } = req.body;
+    const cleanName = String(name || '').trim();
+    if (!cleanName) {
+      return res.status(400).json({ error: 'El nombre del sub-equipo / categoría es obligatorio.' });
+    }
+
+    const parentRes = await pool.query('SELECT * FROM teams WHERE id = $1', [parentTeamId]);
+    if (parentRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Club principal no encontrado.' });
+    }
+    const parent = parentRes.rows[0];
+    const mode = pitchMode === '11v11' ? '11v11' : pitchMode === '7v7' ? '7v7' : '5v5';
+    const defaultForm = mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1';
+    const cleanShort = (shortName || parent.short_name || cleanName.substring(0, 3) || 'SUB').toUpperCase().substring(0, 5);
+    const cleanCat = String(category || 'Categoría Libre').trim();
+
+    const ins = await pool.query(
+      `INSERT INTO teams (name, short_name, coach_name, owner_id, parent_team_id, category_label, primary_color, logo_url, pitch_mode, formation)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      [
+        cleanName,
+        cleanShort,
+        parent.coach_name,
+        parent.owner_id,
+        parentTeamId,
+        cleanCat,
+        color || parent.primary_color || '#10B981',
+        parent.logo_url || null,
+        mode,
+        defaultForm
+      ]
+    );
+    const state = await broadcastState();
+    res.status(201).json({
+      message: `Sub-equipo "${cleanName}" creado exitosamente.`,
+      teamId: 'team-' + ins.rows[0].id,
+      state
+    });
+  } catch (err) {
+    res.status(400).json({ error: 'Ya existe un equipo o categoría con ese nombre.' });
+  }
+});
+
+app.delete('/api/teams/subteams/:subTeamId', authenticateToken, authorizeRoles('club', 'admin'), async (req, res) => {
+  try {
+    const subTeamId = parseId(req.params.subTeamId);
+    if (req.user.role === 'admin') {
+      await pool.query('DELETE FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL', [subTeamId]);
+    } else {
+      const parentTeamId = parseId(req.user.teamId);
+      const del = await pool.query(
+        'DELETE FROM teams WHERE id = $1 AND parent_team_id = $2 RETURNING id',
+        [subTeamId, parentTeamId]
+      );
+      if (del.rows.length === 0) {
+        return res.status(403).json({ error: 'No puedes eliminar el club principal ni sub-equipos de otro club.' });
+      }
+    }
+    const state = await broadcastState();
+    res.json({ message: 'Sub-equipo / categoría eliminado correctamente.', state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
 // 2. GESTIÓN TÁCTICA Y LÍMITE ESTRICTO 5v5 / 7v7
 // ==========================================
 app.put('/api/teams/my-tactics', authenticateToken, authorizeRoles('club'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const teamId = parseId(req.user.teamId);
-    const { pitchMode, formation, resetPositions, logoUrl, color, shortName, name } = req.body;
+    const { teamId: reqTeamId, pitchMode, formation, resetPositions, logoUrl, color, shortName, name, category } = req.body;
+    const teamId = await resolveAuthorizedTeamId(req, reqTeamId, client);
+    if (!teamId) return res.status(403).json({ error: 'No tienes permisos sobre este sub-equipo.' });
 
     await client.query('BEGIN');
 
-    if (logoUrl !== undefined || color || shortName || name) {
+    if (logoUrl !== undefined || color || shortName || name || category) {
       await client.query(
         `UPDATE teams SET
           logo_url = COALESCE($1, logo_url),
           primary_color = COALESCE($2, primary_color),
           short_name = COALESCE($3, short_name),
-          name = COALESCE($4, name)
-         WHERE id = $5`,
-        [logoUrl !== undefined ? logoUrl : null, color || null, shortName || null, name || null, teamId]
+          name = COALESCE($4, name),
+          category_label = COALESCE($5, category_label)
+         WHERE id = $6`,
+        [logoUrl !== undefined ? logoUrl : null, color || null, shortName || null, name || null, category || null, teamId]
       );
+      // Si se actualiza el logo del club principal, propagarlo a sub-equipos que no tengan logo propio
+      const rootTeamId = parseId(req.user.teamId);
+      if (teamId === rootTeamId && logoUrl) {
+        await client.query('UPDATE teams SET logo_url = $1 WHERE parent_team_id = $2', [logoUrl, rootTeamId]);
+      }
     }
 
     if (pitchMode) {
@@ -616,17 +862,22 @@ app.put('/api/teams/my-tactics', authenticateToken, authorizeRoles('club'), asyn
 app.put('/api/players/:playerId/position', authenticateToken, authorizeRoles('club'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const teamId = parseId(req.user.teamId);
     const playerId = parseId(req.params.playerId);
-    const { customX, customY, swapWithPlayerId } = req.body;
+    const { customX, customY, swapWithPlayerId, teamId: reqTeamId } = req.body;
 
     await client.query('BEGIN');
 
-    const pRes = await client.query('SELECT * FROM players WHERE id = $1 AND team_id = $2', [playerId, teamId]);
-    if (pRes.rows.length === 0) {
+    const pLookup = await client.query('SELECT * FROM players WHERE id = $1', [playerId]);
+    if (pLookup.rows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Jugador no pertenece a tu club.' });
+      return res.status(404).json({ error: 'Jugador no encontrado.' });
     }
+    const teamId = await resolveAuthorizedTeamId(req, reqTeamId || pLookup.rows[0].team_id, client);
+    if (!teamId || pLookup.rows[0].team_id !== teamId) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Jugador no pertenece a tu club ni a sus categorías.' });
+    }
+    const pRes = pLookup;
 
     if (swapWithPlayerId) {
       const otherId = parseId(swapWithPlayerId);
@@ -664,13 +915,14 @@ app.put('/api/players/:playerId/position', authenticateToken, authorizeRoles('cl
 app.put('/api/players/:playerId/toggle-starter', authenticateToken, authorizeRoles('club'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const teamId = parseId(req.user.teamId);
     const playerId = parseId(req.params.playerId);
     const replacePlayerId = req.body.replacePlayerId ? parseId(req.body.replacePlayerId) : null;
 
-    // Verificar que el jugador pertenezca al club del DT autenticado
-    const pRes = await client.query('SELECT * FROM players WHERE id = $1 AND team_id = $2', [playerId, teamId]);
-    if (pRes.rows.length === 0) return res.status(403).json({ error: 'No puedes modificar jugadores de otro club.' });
+    // Verificar que el jugador pertenezca al club del DT autenticado o a uno de sus sub-equipos
+    const pRes = await client.query('SELECT * FROM players WHERE id = $1', [playerId]);
+    if (pRes.rows.length === 0) return res.status(404).json({ error: 'Jugador no encontrado.' });
+    const teamId = await resolveAuthorizedTeamId(req, pRes.rows[0].team_id, client);
+    if (!teamId) return res.status(403).json({ error: 'No puedes modificar jugadores de otro club.' });
 
     const player = pRes.rows[0];
     if (player.status !== 'Disponible' && !player.is_starter) {
@@ -740,7 +992,10 @@ app.put('/api/players/:playerId/toggle-starter', authenticateToken, authorizeRol
 
 app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, res) => {
   try {
-    const teamId = parseId(req.user.teamId);
+    const teamId = await resolveAuthorizedTeamId(req, req.body.teamId);
+    if (!teamId) {
+      return res.status(403).json({ error: 'No tienes permisos para inscribir jugadores en este equipo.' });
+    }
     const {
       firstName,
       lastName,
@@ -765,14 +1020,14 @@ app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, 
       return res.status(400).json({ error: 'El dorsal debe estar entre 1 y 99.' });
     }
 
-    // Verificar que el dorsal no esté ocupado en el mismo club
+    // Verificar que el dorsal no esté ocupado en el mismo equipo/categoría
     const dupCheck = await pool.query(
       'SELECT id, full_name FROM players WHERE team_id = $1 AND dorsal = $2',
       [teamId, dorsal]
     );
     if (dupCheck.rows.length > 0) {
       return res.status(409).json({
-        error: `El dorsal #${dorsal} ya está ocupado en tu club por ${dupCheck.rows[0].full_name}.`
+        error: `El dorsal #${dorsal} ya está ocupado en esta categoría por ${dupCheck.rows[0].full_name}.`
       });
     }
 
@@ -786,7 +1041,9 @@ app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, 
       });
     }
 
-    // Validar que la fecha de nacimiento esté entre 9 y 40 años respecto a la fecha actual
+    // Validar edad dinámica según la categoría del equipo / sub-equipo
+    const teamCatRes = await pool.query('SELECT category_label FROM teams WHERE id = $1', [teamId]);
+    const ageBounds = getCategoryAgeBounds(teamCatRes.rows[0]?.category_label);
     const bParts = String(birthDate).split('-');
     if (bParts.length === 3) {
       const bDateObj = new Date(Number(bParts[0]), Number(bParts[1]) - 1, Number(bParts[2]));
@@ -796,9 +1053,9 @@ app.post('/api/players', authenticateToken, authorizeRoles('club'), async (req, 
       if (mDiff < 0 || (mDiff === 0 && now.getDate() < bDateObj.getDate())) {
         ageYears--;
       }
-      if (ageYears < 9 || ageYears > 40) {
+      if (ageYears < ageBounds.minAge || ageYears > ageBounds.maxAge) {
         return res.status(400).json({
-          error: `La edad del jugador (${ageYears} años) no es válida. Debe tener entre 9 y 40 años.`
+          error: `La edad del jugador (${ageYears} años) no corresponde a la categoría ${ageBounds.label} (permitido: ${ageBounds.minAge} a ${ageBounds.maxAge} años).`
         });
       }
     }
@@ -888,8 +1145,11 @@ app.delete('/api/players/:playerId', authenticateToken, authorizeRoles('club', '
     if (req.user.role === 'admin') {
       await pool.query('DELETE FROM players WHERE id = $1', [playerId]);
     } else {
-      const teamId = parseId(req.user.teamId);
-      await pool.query('DELETE FROM players WHERE id = $1 AND team_id = $2', [playerId, teamId]);
+      const pCheck = await pool.query('SELECT team_id FROM players WHERE id = $1', [playerId]);
+      if (pCheck.rows.length === 0) return res.status(404).json({ error: 'Jugador no encontrado.' });
+      const authTeamId = await resolveAuthorizedTeamId(req, pCheck.rows[0].team_id);
+      if (!authTeamId) return res.status(403).json({ error: 'No puedes eliminar jugadores de otro club.' });
+      await pool.query('DELETE FROM players WHERE id = $1 AND team_id = $2', [playerId, authTeamId]);
     }
     const state = await broadcastState();
     res.json({ message: 'Jugador dado de baja del plantel.', state });
@@ -997,13 +1257,24 @@ app.post('/api/matches', authenticateToken, authorizeRoles('admin'), async (req,
     if (!tId || !hId || !aId || hId === aId) {
       return res.status(400).json({ error: 'Debes elegir dos clubes distintos para programar el partido.' });
     }
-    await pool.query(
+    const insMatch = await pool.query(
       `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
-       VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0)`,
+       VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0) RETURNING id`,
       [tId, round || 'Jornada Especial', date || 'Por definir', pitch || 'Cancha Principal', hId, aId]
     );
+    const newMatchId = insMatch.rows[0].id;
+    const tInfo = await pool.query('SELECT referee_fee FROM tournaments WHERE id = $1', [tId]);
+    const refFee = tInfo.rows[0]?.referee_fee || '$20 USD';
+    const mDateLabel = date || 'Por definir';
+    const mRoundLabel = round || 'Jornada Especial';
+    await pool.query(
+      `INSERT INTO club_payments (team_id, tournament_id, match_id, concept, amount, method, reference, payment_date, status)
+       VALUES ($1, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid'),
+              ($7, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid')`,
+      [hId, tId, newMatchId, `Arbitraje — ${mRoundLabel}`, refFee, mDateLabel, aId]
+    );
     const state = await broadcastState();
-    res.status(201).json({ message: 'Partido programado manualmente.', state });
+    res.status(201).json({ message: 'Partido programado y deuda de arbitraje generada.', state });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -1025,8 +1296,9 @@ app.delete('/api/matches/:matchId', authenticateToken, authorizeRoles('admin'), 
 // ==========================================
 app.post('/api/payments', authenticateToken, authorizeRoles('club'), async (req, res) => {
   try {
-    const teamId = parseId(req.user.teamId);
-    const { tournamentId, concept, amount, method, reference, date, receiptDoc } = req.body;
+    const { teamId: reqTeamId, tournamentId, concept, amount, method, reference, date, receiptDoc } = req.body;
+    const teamId = await resolveAuthorizedTeamId(req, reqTeamId);
+    if (!teamId) return res.status(403).json({ error: 'No tienes permisos sobre este equipo.' });
     const tId = tournamentId ? parseId(tournamentId) : 1;
 
     await pool.query(
@@ -1038,6 +1310,32 @@ app.post('/api/payments', authenticateToken, authorizeRoles('club'), async (req,
     res.status(201).json({ message: 'Pago reportado correctamente.', state });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/payments/:paymentId/receipt', authenticateToken, authorizeRoles('club'), async (req, res) => {
+  try {
+    const paymentId = parseId(req.params.paymentId);
+    const { method, reference, receiptDoc, date } = req.body;
+    const payCheck = await pool.query('SELECT team_id FROM club_payments WHERE id = $1', [paymentId]);
+    if (payCheck.rows.length === 0) return res.status(404).json({ error: 'Registro de pago no encontrado.' });
+    const authTeamId = await resolveAuthorizedTeamId(req, payCheck.rows[0].team_id);
+    if (!authTeamId) return res.status(403).json({ error: 'No tienes permisos sobre este pago.' });
+
+    await pool.query(
+      `UPDATE club_payments SET
+        method = COALESCE($1, method),
+        reference = COALESCE($2, reference),
+        receipt_doc = COALESCE($3, receipt_doc),
+        payment_date = COALESCE($4, payment_date),
+        status = 'pending'
+       WHERE id = $5`,
+      [method || 'Pago Móvil', reference || 'Comprobante', receiptDoc || null, date || null, paymentId]
+    );
+    const state = await broadcastState();
+    res.json({ message: 'Comprobante subido. En espera de verificación del organizador.', state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1105,11 +1403,12 @@ app.post('/api/tournaments', authenticateToken, authorizeRoles('admin'), async (
     const regFeeText = (registrationFee && String(registrationFee).trim()) || '$150 USD';
     const refFeeText = (refereeFee && String(refereeFee).trim()) || '$20 USD';
 
+    const cleanCategory = (category && String(category).trim()) || 'Categoría Libre';
     await client.query('BEGIN');
     const ins = await client.query(
-      `INSERT INTO tournaments (name, format, pitch_size, max_teams, start_date, prize, registration_fee, referee_fee, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open') RETURNING id`,
-      [name, formatText, cleanSize, limitTeams, startDate, prize, regFeeText, refFeeText]
+      `INSERT INTO tournaments (name, format, category_label, pitch_size, max_teams, start_date, prize, registration_fee, referee_fee, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open') RETURNING id`,
+      [name, formatText, cleanCategory, cleanSize, limitTeams, startDate, prize, regFeeText, refFeeText]
     );
     const newTourneyId = ins.rows[0].id;
     await client.query('COMMIT');
@@ -1153,6 +1452,12 @@ app.put('/api/matches/:matchId/schedule', authenticateToken, authorizeRoles('adm
        WHERE id = $4`,
       [round || null, date || null, pitch || null, matchId, reactivateIfSuspended !== false]
     );
+    if (date) {
+      await pool.query(
+        "UPDATE club_payments SET payment_date = $1 WHERE match_id = $2 AND status = 'unpaid'",
+        [date, matchId]
+      );
+    }
     const state = await broadcastState();
     res.json({ message: 'Horario y cancha del partido actualizados.', state });
   } catch (err) {
@@ -1163,7 +1468,13 @@ app.put('/api/matches/:matchId/schedule', authenticateToken, authorizeRoles('adm
 app.post('/api/tournaments/:tournamentId/toggle-enrollment', authenticateToken, authorizeRoles('club', 'admin'), async (req, res) => {
   try {
     const tournamentId = parseId(req.params.tournamentId);
-    const teamId = req.user.role === 'admin' && req.body.teamId ? parseId(req.body.teamId) : parseId(req.user.teamId);
+    let teamId = null;
+    if (req.user.role === 'admin' && req.body.teamId) {
+      teamId = parseId(req.body.teamId);
+    } else {
+      teamId = await resolveAuthorizedTeamId(req, req.body.teamId);
+    }
+    if (!teamId) return res.status(403).json({ error: 'No tienes permisos sobre este equipo/categoría.' });
 
     const existing = await pool.query(
       'SELECT * FROM tournament_registrations WHERE tournament_id = $1 AND team_id = $2',
@@ -1171,11 +1482,28 @@ app.post('/api/tournaments/:tournamentId/toggle-enrollment', authenticateToken, 
     );
     if (existing.rows.length > 0) {
       await pool.query('DELETE FROM tournament_registrations WHERE tournament_id = $1 AND team_id = $2', [tournamentId, teamId]);
+      await pool.query(
+        "DELETE FROM club_payments WHERE tournament_id = $1 AND team_id = $2 AND match_id IS NULL AND status = 'unpaid'",
+        [tournamentId, teamId]
+      );
     } else {
       await pool.query(
         "INSERT INTO tournament_registrations (tournament_id, team_id, status) VALUES ($1, $2, 'approved')",
         [tournamentId, teamId]
       );
+      const tInfo = await pool.query('SELECT name, registration_fee, start_date FROM tournaments WHERE id = $1', [tournamentId]);
+      const tRow = tInfo.rows[0];
+      const existingDebt = await pool.query(
+        "SELECT id FROM club_payments WHERE tournament_id = $1 AND team_id = $2 AND match_id IS NULL AND concept LIKE 'Inscripción%'",
+        [tournamentId, teamId]
+      );
+      if (tRow && existingDebt.rows.length === 0) {
+        await pool.query(
+          `INSERT INTO club_payments (team_id, tournament_id, match_id, concept, amount, method, reference, payment_date, status)
+           VALUES ($1, $2, NULL, $3, $4, 'Por pagar', 'Sin comprobante', $5, 'unpaid')`,
+          [teamId, tournamentId, `Inscripción Oficial — ${tRow.name}`, tRow.registration_fee || '$150 USD', tRow.start_date || 'Por pagar']
+        );
+      }
     }
 
     const state = await broadcastState();
@@ -1260,7 +1588,8 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
     const timeSlots = ['19:00', '20:15', '21:30', '22:30'];
     let created = 0;
 
-    // PRIMERA VUELTA (IDA)
+    // PRIMERA VUELTA (IDA) + Deuda de Arbitraje por jornada
+    const refFeeAmount = t.referee_fee || '$20 USD';
     const firstLegRounds = [];
     for (let r = 0; r < rounds; r++) {
       let slotIdx = 0;
@@ -1273,11 +1602,20 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
           const matchHour = timeSlots[slotIdx % timeSlots.length];
           const pitchNum = (slotIdx % 2) + 1;
           slotIdx++;
+          const roundLabel = `Jornada ${r + 1} (Ida)`;
+          const matchDateStr = `${t.start_date} • ${matchHour}`;
           roundMatches.push({ h, a, matchHour, pitchNum });
-          await client.query(
+          const mIns = await client.query(
             `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
-             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0)`,
-            [tournamentId, `Jornada ${r + 1} (Ida)`, `${t.start_date} • ${matchHour}`, `Cancha ${pitchNum} (${t.pitch_size})`, h, a]
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0) RETURNING id`,
+            [tournamentId, roundLabel, matchDateStr, `Cancha ${pitchNum} (${t.pitch_size})`, h, a]
+          );
+          const mId = mIns.rows[0].id;
+          await client.query(
+            `INSERT INTO club_payments (team_id, tournament_id, match_id, concept, amount, method, reference, payment_date, status)
+             VALUES ($1, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid'),
+                    ($7, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid')`,
+            [h, tournamentId, mId, `Arbitraje — ${roundLabel}`, refFeeAmount, matchDateStr, a]
           );
         }
       }
@@ -1285,15 +1623,24 @@ app.post('/api/tournaments/:tournamentId/generate-fixture', authenticateToken, a
       list.splice(1, 0, list.pop());
     }
 
-    // SEGUNDA VUELTA (VUELTA — Localía invertida)
+    // SEGUNDA VUELTA (VUELTA — Localía invertida) + Deuda de Arbitraje por jornada
     for (let r = 0; r < firstLegRounds.length; r++) {
       const roundMatches = firstLegRounds[r];
       for (const rm of roundMatches) {
         created++;
-        await client.query(
+        const roundLabel2 = `Jornada ${rounds + r + 1} (Vuelta)`;
+        const matchDateStr2 = `${t.start_date} • ${rm.matchHour}`;
+        const mIns2 = await client.query(
           `INSERT INTO matches (tournament_id, round_name, match_date, pitch_name, home_team_id, away_team_id, home_score, away_score, status, period, current_minute)
-           VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0)`,
-          [tournamentId, `Jornada ${rounds + r + 1} (Vuelta)`, `${t.start_date} • ${rm.matchHour}`, `Cancha ${rm.pitchNum} (${t.pitch_size})`, rm.a, rm.h]
+           VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'scheduled', '1T', 0) RETURNING id`,
+          [tournamentId, roundLabel2, matchDateStr2, `Cancha ${rm.pitchNum} (${t.pitch_size})`, rm.a, rm.h]
+        );
+        const mId2 = mIns2.rows[0].id;
+        await client.query(
+          `INSERT INTO club_payments (team_id, tournament_id, match_id, concept, amount, method, reference, payment_date, status)
+           VALUES ($1, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid'),
+                  ($7, $2, $3, $4, $5, 'Por pagar', 'Sin comprobante', $6, 'unpaid')`,
+          [rm.a, tournamentId, mId2, `Arbitraje — ${roundLabel2}`, refFeeAmount, matchDateStr2, rm.h]
         );
       }
     }
@@ -1386,7 +1733,10 @@ app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('refere
       awayScore,
       homePenalties,
       awayPenalties,
-      penaltiesLog
+      penaltiesLog,
+      clockRunning,
+      clockStartedAt,
+      clockElapsedSec
     } = req.body;
 
     if (status && minute !== undefined) {
@@ -1395,6 +1745,32 @@ app.put('/api/matches/:matchId/state', authenticateToken, authorizeRoles('refere
       await pool.query('UPDATE matches SET status = $1 WHERE id = $2', [status, matchId]);
     } else if (minute !== undefined) {
       await pool.query('UPDATE matches SET current_minute = $1 WHERE id = $2', [minute, matchId]);
+    }
+    if (clockRunning !== undefined || clockStartedAt !== undefined || clockElapsedSec !== undefined) {
+      const cRun = clockRunning !== undefined ? Boolean(clockRunning) : null;
+      const cStart = clockStartedAt !== undefined ? (clockStartedAt ? Number(clockStartedAt) : null) : undefined;
+      const cElap = clockElapsedSec !== undefined ? Number(clockElapsedSec) || 0 : null;
+      await pool.query(
+        `UPDATE matches SET
+          clock_running = COALESCE($1, clock_running),
+          clock_started_at = CASE WHEN $2::boolean THEN $3::bigint ELSE clock_started_at END,
+          clock_elapsed_sec = COALESCE($4, clock_elapsed_sec)
+         WHERE id = $5`,
+        [cRun, clockStartedAt !== undefined, cStart !== undefined ? cStart : null, cElap, matchId]
+      );
+    }
+    // Si se finaliza o suspende el partido, congelar el cronómetro en PostgreSQL
+    if (status === 'finished' || status === 'suspended') {
+      await pool.query(
+        `UPDATE matches SET
+          clock_elapsed_sec = CASE WHEN clock_running AND clock_started_at IS NOT NULL
+            THEN COALESCE(clock_elapsed_sec, 0) + GREATEST(0, FLOOR((EXTRACT(EPOCH FROM NOW()) * 1000 - clock_started_at) / 1000)::int)
+            ELSE COALESCE(clock_elapsed_sec, 0) END,
+          clock_running = FALSE,
+          clock_started_at = NULL
+         WHERE id = $1`,
+        [matchId]
+      );
     }
     if (period) {
       await pool.query('UPDATE matches SET period = $1 WHERE id = $2', [period, matchId]);

@@ -178,6 +178,65 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* ==========================================
+   OPTIMIZACIÓN MÓVIL (RESPONSIVE APP-LIKE UI)
+   ========================================== */
+.mobile-nav-scroll {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+@media (max-width: 768px) {
+    .glass-panel {
+        border-radius: 16px;
+    }
+
+    .mobile-nav-scroll {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 4px;
+        gap: 6px;
+        width: 100%;
+    }
+    .mobile-nav-scroll::-webkit-scrollbar {
+        display: none;
+    }
+    .mobile-nav-scroll > button,
+    .mobile-nav-scroll > div {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    .mobile-header-actions {
+        width: 100%;
+        display: grid !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px !important;
+    }
+    .mobile-header-actions > button {
+        width: 100%;
+        padding: 8px 6px !important;
+        font-size: 11px !important;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .mobile-compact-pad {
+        padding: 12px !important;
+    }
+
+    .fallback-input {
+        padding: 10px 12px;
+        font-size: 13px;
+    }
+}
+
 .loader-bar-fill {
     height: 100%;
     width: 0%;

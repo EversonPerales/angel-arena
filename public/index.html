@@ -400,8 +400,40 @@
         if (!db.payments) db.payments = createInitialData().payments;
         if (!db.referees) db.referees = [{ id: 'ref-1', name: 'Árbitro Oficial — Liga F7 Caracas', email: 'arbitro@ligaf7caracas.com', pass: 'ref123' }];
 
-        function applyServerState(remoteState) {
+        var lastStateDigest = '';
+        var realtimePullTimer = null;
+
+        function computeQuickStateDigest(st) {
+            if (!st) return '';
+            try {
+                return JSON.stringify({
+                    t: st.tournaments,
+                    tm: st.teams,
+                    p: st.players,
+                    s: st.staff,
+                    py: st.payments,
+                    m: st.matches,
+                    e: st.events,
+                    r: st.referees
+                });
+            } catch (err) {
+                return String(Date.now());
+            }
+        }
+
+        function isUserActivelyTyping() {
+            var el = document.activeElement;
+            if (!el) return false;
+            var tag = (el.tagName || '').toUpperCase();
+            return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+        }
+
+        function applyServerState(remoteState, forceRender) {
             if (!remoteState || !remoteState.teams) return;
+            var newDigest = computeQuickStateDigest(remoteState);
+            var changed = (newDigest !== lastStateDigest);
+            lastStateDigest = newDigest;
+
             if (remoteState.referees) db.referees = remoteState.referees;
             db.tournaments = remoteState.tournaments || [];
             db.teams = remoteState.teams || [];
@@ -414,7 +446,27 @@
                 activeTourneyId = db.tournaments[0].id;
             }
             saveDB();
+
+            // Evitar interrumpir al usuario si está llenando un formulario en un modal abierto;
+            // los datos ya quedaron guardados en memoria y se pintarán al instante al cerrar el modal o si hubo acción directa.
+            var modalEl = document.getElementById('global-modal');
+            var modalOpen = modalEl && modalEl.style.display === 'flex';
+            if (!forceRender && !changed) return;
+            if (!forceRender && (modalOpen || isUserActivelyTyping())) return;
+
             renderViewport();
+        }
+
+        function pullLatestStateNow(forceRender) {
+            if (typeof window.fetch !== 'function' || window.location.protocol === 'file:') return;
+            var headers = {};
+            if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+            window.fetch('/api/state?t=' + Date.now(), { cache: 'no-store', headers: headers })
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(state) {
+                    if (state) applyServerState(state, forceRender);
+                })
+                .catch(function() {});
         }
 
         function apiRequest(method, url, body, onSuccess) {
@@ -424,6 +476,7 @@
             window.fetch(url, {
                 method: method,
                 headers: headers,
+                cache: 'no-store',
                 body: body ? JSON.stringify(body) : undefined
             })
             .then(function(res) {
@@ -446,7 +499,7 @@
             })
             .then(function(data) {
                 if (!data) return;
-                if (data.state) applyServerState(data.state);
+                if (data.state) applyServerState(data.state, true);
                 if (typeof onSuccess === 'function') onSuccess(data);
             })
             .catch(function() {});
@@ -460,18 +513,46 @@
                     saveDB();
                     renderViewport();
                 }
-                window.fetch('/api/state', { cache: 'no-store' })
-                    .then(function(r) { return r.ok ? r.json() : null; })
-                    .then(function(state) {
-                        if (state) applyServerState(state);
-                    })
-                    .catch(function() {});
+                pullLatestStateNow(true);
+
+                // Sincronización inmediata al volver a la pestaña, desbloquear el móvil o recuperar internet
+                document.addEventListener('visibilitychange', function() {
+                    if (document.visibilityState === 'visible') {
+                        pullLatestStateNow(false);
+                    }
+                });
+                window.addEventListener('focus', function() {
+                    pullLatestStateNow(false);
+                });
+                window.addEventListener('online', function() {
+                    pullLatestStateNow(false);
+                });
+
+                // Respaldo ultraligero cada 12s por si un proxy móvil silencia el WebSocket
+                if (realtimePullTimer) clearInterval(realtimePullTimer);
+                realtimePullTimer = setInterval(function() {
+                    if (document.visibilityState === 'visible') {
+                        pullLatestStateNow(false);
+                    }
+                }, 12000);
             }
             if (typeof io !== 'undefined' && window.location.protocol !== 'file:') {
                 try {
-                    socket = io();
+                    socket = io({
+                        transports: ['websocket', 'polling'],
+                        reconnection: true,
+                        reconnectionAttempts: Infinity,
+                        reconnectionDelay: 1000,
+                        reconnectionDelayMax: 5000
+                    });
+                    socket.on('connect', function() {
+                        pullLatestStateNow(false);
+                    });
+                    socket.on('reconnect', function() {
+                        pullLatestStateNow(false);
+                    });
                     socket.on('state_sync', function(remoteState) {
-                        applyServerState(remoteState);
+                        applyServerState(remoteState, false);
                     });
                     socket.on('live_clock_sync', function(clockData) {
                         if (!clockData) return;
@@ -506,6 +587,7 @@
         function closeGlobalModal() {
             var m = document.getElementById('global-modal');
             if (m) m.style.display = 'none';
+            if (db && db.currentUser) renderViewport();
         }
 
         // =========================================================================
@@ -650,7 +732,10 @@
                     db.currentUser = data.user;
                     selectedPitchStarterId = null;
                     saveDB();
-                    window.fetch('/api/state', { cache: 'no-store' })
+                    window.fetch('/api/state?t=' + Date.now(), {
+                        cache: 'no-store',
+                        headers: { 'Authorization': 'Bearer ' + authToken }
+                    })
                         .then(function(r) { return r.ok ? r.json() : null; })
                         .then(function(st) {
                             if (st) applyServerState(st);
@@ -706,6 +791,7 @@
             stopRefTimer();
             authToken = null;
             db.currentUser = null;
+            activeClubTeamId = null;
             selectedPitchStarterId = null;
             saveDB();
             renderViewport();
@@ -917,9 +1003,53 @@
             renderViewport();
         }
 
+        function getMatchLiveElapsedSeconds(m) {
+            if (!m) return 0;
+            var base = (typeof m.clockElapsedSec === 'number') ? m.clockElapsedSec : ((m.minute || 0) * 60);
+            if (m.status === 'live' && m.clockRunning && m.clockStartedAt) {
+                var diffSec = Math.max(0, Math.floor((Date.now() - Number(m.clockStartedAt)) / 1000));
+                return base + diffSec;
+            }
+            return base;
+        }
+
+        function formatClockMMSS(totalSec) {
+            var safe = Math.max(0, Math.floor(totalSec || 0));
+            var mins = Math.floor(safe / 60);
+            var secs = safe % 60;
+            return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+        }
+
+        var globalLiveClockInterval = null;
+        function ensureGlobalLiveClockTick() {
+            if (globalLiveClockInterval) return;
+            globalLiveClockInterval = setInterval(function() {
+                if (!db || !db.matches) return;
+                for (var i = 0; i < db.matches.length; i++) {
+                    var m = db.matches[i];
+                    if (m.status !== 'live') continue;
+                    var totalSec = getMatchLiveElapsedSeconds(m);
+                    var curMin = Math.floor(totalSec / 60);
+                    m.minute = curMin;
+
+                    // Actualizar reloj principal del árbitro si está viendo este partido
+                    var refClockEl = document.getElementById('ref-clock-display');
+                    if (refClockEl && (currentRefMatchId === m.id || refClockEl.getAttribute('data-match-id') === m.id)) {
+                        refClockEl.textContent = formatClockMMSS(totalSec);
+                    }
+                    // Actualizar badges en vivo en cualquier vista (espectadores, clubes, organizador)
+                    var badges = document.querySelectorAll('[data-live-badge="' + m.id + '"]');
+                    for (var b = 0; b < badges.length; b++) {
+                        badges[b].textContent = '🔴 EN VIVO ' + formatClockMMSS(totalSec);
+                    }
+                }
+            }, 1000);
+        }
+
         function renderMatchStatusBadgeHtml(m) {
             if (m.status === 'live') {
-                return '<span class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">🔴 EN VIVO ' + String(m.minute || 0).padStart(2, '0') + '\'</span>';
+                var liveTime = formatClockMMSS(getMatchLiveElapsedSeconds(m));
+                return '<span data-live-badge="' + m.id + '" class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">🔴 EN VIVO ' + liveTime + '</span>';
             }
             if (m.status === 'suspended') {
                 return '<span class="px-2 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">🌧️ SUSPENDIDO / REPROGRAMAR</span>';
@@ -1254,8 +1384,254 @@
             }
         }
 
+        var activeClubTeamId = null;
+
+        function getRootClubTeam() {
+            if (!db.currentUser || !db.currentUser.teamId) return null;
+            return findTeam(db.currentUser.teamId);
+        }
+
+        function getMyClubSubTeams() {
+            if (!db.currentUser || !db.currentUser.teamId) return [];
+            var rootId = db.currentUser.teamId;
+            var list = [];
+            for (var i = 0; i < db.teams.length; i++) {
+                if (db.teams[i].parentTeamId === rootId) {
+                    list.push(db.teams[i]);
+                }
+            }
+            return list;
+        }
+
+        function getActiveClubTeam() {
+            var subTeams = getMyClubSubTeams();
+            if (subTeams.length === 0) return null;
+            if (activeClubTeamId) {
+                for (var i = 0; i < subTeams.length; i++) {
+                    if (subTeams[i].id === activeClubTeamId) return subTeams[i];
+                }
+            }
+            activeClubTeamId = subTeams[0].id;
+            return subTeams[0];
+        }
+
+        function selectActiveClubTeam(teamId) {
+            activeClubTeamId = teamId;
+            selectedPitchStarterId = null;
+            renderViewport();
+        }
+
+        function getCategoryAgeBounds(categoryLabel) {
+            var cat = String(categoryLabel || '').toLowerCase();
+            var m = cat.match(/sub[-\s]?(\d{1,2})/);
+            if (m) {
+                var maxAge = parseInt(m[1], 10);
+                var minAge = Math.max(4, maxAge - 4);
+                return { minAge: minAge, maxAge: maxAge, label: 'Sub-' + maxAge };
+            }
+            if (cat.indexOf('libre') !== -1 || cat.indexOf('adult') !== -1 || cat.indexOf('femenino') !== -1) {
+                return { minAge: 15, maxAge: 40, label: categoryLabel || 'Categoría Libre' };
+            }
+            return { minAge: 4, maxAge: 40, label: categoryLabel || 'General' };
+        }
+
+        function openCreateSubTeamModal() {
+            var rootClub = getRootClubTeam();
+            if (!rootClub) return;
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Nueva Categoría / Sub-Equipo • ' + rootClub.name + '</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">➕ Agregar Sub-Equipo / Categoría</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<p class="text-xs text-slate-400 m-0">Crea una nueva categoría dentro de <strong class="text-white">' + rootClub.name + '</strong> (ej: <em>' + rootClub.name + ' Sub-8 B</em>, <em>' + rootClub.name + ' Sub-10 B</em>). Compartirá el mismo Cuerpo Técnico del club pero tendrá su propio plantel, dorsales, pizarra 2D y torneos.</p>' +
+                    '<form onsubmit="handleCreateSubTeam(event)" class="space-y-3 text-xs">' +
+                        '<div>' +
+                            '<label class="block font-bold text-slate-300 mb-1">Nombre del Sub-Equipo / Categoría <span class="text-rose-400">*</span></label>' +
+                            '<input type="text" id="sub-team-name" required placeholder="Ej: ' + rootClub.name + ' Sub-10 B" value="' + rootClub.name + ' Sub-10 B" class="fallback-input">' +
+                        '</div>' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Categoría por Edad <span class="text-rose-400">*</span></label>' +
+                                '<select id="sub-team-cat" onchange="onSubTeamCatChange()" class="fallback-input">' +
+                                    '<option value="Sub-6">Sub-6 (4 a 6 años)</option>' +
+                                    '<option value="Sub-8">Sub-8 (4 a 8 años)</option>' +
+                                    '<option value="Sub-10" selected>Sub-10 (6 a 10 años)</option>' +
+                                    '<option value="Sub-11">Sub-11 (7 a 11 años)</option>' +
+                                    '<option value="Sub-12">Sub-12 (8 a 12 años)</option>' +
+                                    '<option value="Sub-13">Sub-13 (9 a 13 años)</option>' +
+                                    '<option value="Sub-14">Sub-14 (10 a 14 años)</option>' +
+                                    '<option value="Sub-15">Sub-15 (11 a 15 años)</option>' +
+                                    '<option value="Sub-17">Sub-17 (13 a 17 años)</option>' +
+                                    '<option value="Sub-20">Sub-20 (16 a 20 años)</option>' +
+                                    '<option value="Categoría Libre">Categoría Libre (15 a 40 años)</option>' +
+                                    '<option value="Femenino Libre">Femenino Libre (15 a 40 años)</option>' +
+                                '</select>' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Modalidad de Cancha</label>' +
+                                '<select id="sub-team-mode" class="fallback-input">' +
+                                    '<option value="5v5">⚽ Fútbol 5 (5v5)</option>' +
+                                    '<option value="7v7" selected>🏟️ Fútbol 7 (7v7)</option>' +
+                                    '<option value="11v11">🏆 Fútbol 11 (11v11)</option>' +
+                                '</select>' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Siglas (Máx. 5)</label>' +
+                                '<input type="text" id="sub-team-short" required maxlength="5" value="' + (rootClub.shortName || 'CLB') + '" class="fallback-input uppercase font-mono font-bold">' +
+                            '</div>' +
+                        '</div>' +
+                        '<div id="sub-team-age-hint" class="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-[11px] text-cyan-300 font-bold">🎂 Los jugadores inscritos en esta categoría serán validados automáticamente para edad entre 6 y 10 años.</div>' +
+                        '<div class="flex justify-end gap-2 pt-2">' +
+                            '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
+                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Crear Sub-Equipo / Categoría</button>' +
+                        '</div>' +
+                    '</form>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function onSubTeamCatChange() {
+            var catSel = document.getElementById('sub-team-cat');
+            var hintEl = document.getElementById('sub-team-age-hint');
+            var nameEl = document.getElementById('sub-team-name');
+            var rootClub = getRootClubTeam();
+            if (!catSel) return;
+            var bounds = getCategoryAgeBounds(catSel.value);
+            if (hintEl) {
+                hintEl.textContent = '🎂 Los jugadores inscritos en ' + bounds.label + ' serán validados automáticamente para edad entre ' + bounds.minAge + ' y ' + bounds.maxAge + ' años.';
+            }
+            if (nameEl && rootClub && nameEl.value.indexOf(rootClub.name) === 0) {
+                nameEl.value = rootClub.name + ' ' + catSel.value;
+            }
+        }
+
+        function handleCreateSubTeam(e) {
+            e.preventDefault();
+            var rootClub = getRootClubTeam();
+            if (!rootClub) return;
+            var name = document.getElementById('sub-team-name').value.trim();
+            var category = document.getElementById('sub-team-cat').value;
+            var mode = document.getElementById('sub-team-mode').value || '7v7';
+            var shortName = (document.getElementById('sub-team-short').value.trim() || rootClub.shortName || 'SUB').toUpperCase();
+
+            var tempId = 'team-sub-' + Date.now();
+            db.teams.push({
+                id: tempId,
+                parentTeamId: rootClub.id,
+                category: category,
+                name: name,
+                shortName: shortName,
+                coach: rootClub.coach,
+                email: rootClub.email || '',
+                color: rootClub.color || '#10B981',
+                logoUrl: rootClub.logoUrl || null,
+                pitchMode: mode,
+                formation: mode === '11v11' ? '4-3-3' : mode === '7v7' ? '2-3-1' : '1-2-1'
+            });
+            activeClubTeamId = tempId;
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            apiRequest('POST', '/api/teams/subteams', {
+                name: name,
+                shortName: shortName,
+                category: category,
+                pitchMode: mode,
+                color: rootClub.color || '#10B981'
+            }, function(data) {
+                if (data && data.teamId) {
+                    activeClubTeamId = data.teamId;
+                    renderViewport();
+                }
+            });
+            notify('🎉 Sub-equipo "' + name + '" (' + category + ') creado correctamente');
+        }
+
+        function handleDeleteSubTeam(subTeamId) {
+            var rootClub = getRootClubTeam();
+            if (!rootClub || subTeamId === rootClub.id) {
+                notify('⚠️ No puedes eliminar el club principal.');
+                return;
+            }
+            var sub = findTeam(subTeamId);
+            db.teams = db.teams.filter(function(t) { return t.id !== subTeamId; });
+            db.players = db.players.filter(function(p) { return p.teamId !== subTeamId; });
+            activeClubTeamId = rootClub.id;
+            saveDB();
+            renderViewport();
+            apiRequest('DELETE', '/api/teams/subteams/' + subTeamId);
+            notify('🗑️ Sub-equipo "' + (sub ? sub.name : '') + '" eliminado');
+        }
+
         function renderClubDashboard() {
-            var club = findTeam(db.currentUser.teamId);
+            var rootClub = getRootClubTeam();
+            var subTeams = getMyClubSubTeams();
+            var club = getActiveClubTeam();
+
+            // El Cuerpo Técnico es único para todo el club/escuela (asociado al club principal)
+            var clubStaffList = [];
+            if (db.staff && rootClub) {
+                for (var sIdx = 0; sIdx < db.staff.length; sIdx++) {
+                    if (db.staff[sIdx].teamId === rootClub.id) clubStaffList.push(db.staff[sIdx]);
+                }
+            }
+
+            // Si el club todavía no ha creado ningún equipo/categoría, mostrar el Panel del Club Completo invitando a crear el primero
+            if (!club) {
+                var emptyClubBody = '';
+                if (clubSection === 'staff') {
+                    emptyClubBody = renderClubStaffSection(rootClub, clubStaffList);
+                } else {
+                    emptyClubBody = '<div class="glass-panel p-6 sm:p-8 border border-emerald-500/40 text-center space-y-4">' +
+                        '<div class="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-3xl">⚽</div>' +
+                        '<div class="space-y-1 max-w-lg mx-auto">' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Bienvenido al Panel Institucional de ' + rootClub.name + '</span>' +
+                            '<h2 class="text-xl sm:text-2xl font-black text-white m-0">Crea tus Equipos por Categoría</h2>' +
+                            '<p class="text-xs sm:text-sm text-slate-400 m-0">Aquí administras todo el club <strong>' + rootClub.name + '</strong>. Crea cada equipo oficial por categoría (ej: <em>' + rootClub.name + ' Sub-8 B</em>, <em>' + rootClub.name + ' Sub-10 B</em>) para cargar sus jugadores, armar su pizarra 2D e inscribirlos en sus torneos.</p>' +
+                        '</div>' +
+                        '<div class="flex flex-wrap justify-center gap-2.5 pt-1">' +
+                            '<button onclick="openCreateSubTeamModal()" class="btn-primary-gradient px-6 py-3 text-xs sm:text-sm font-black">➕ Crear Primer Equipo / Categoría</button>' +
+                            '<button onclick="clubSection=\'staff\'; renderViewport();" class="px-4 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">👔 Registrar Cuerpo Técnico del Club (' + clubStaffList.length + ')</button>' +
+                        '</div>' +
+                    '</div>';
+                }
+
+                return '<div class="space-y-5">' +
+                    '<header class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-col gap-4">' +
+                        '<div class="flex flex-wrap items-center justify-between gap-4">' +
+                            '<div class="flex items-center gap-3.5">' +
+                                renderTeamBadgeHtml(rootClub, 56) +
+                                '<div>' +
+                                    '<div class="flex flex-wrap items-center gap-2">' +
+                                        '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase">Panel Oficial del Club</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold uppercase">0 Equipos Creados</span>' +
+                                    '</div>' +
+                                    '<h1 class="text-xl sm:text-2xl font-black text-white m-0 mt-0.5">' + rootClub.name + '</h1>' +
+                                    '<p class="text-xs text-slate-400 m-0">' + db.currentUser.name + ' • Cuerpo Técnico del Club: ' + clubStaffList.length + ' integrantes</p>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="flex flex-wrap items-center gap-2 mobile-header-actions">' +
+                                '<button onclick="openCustomizeClubModal()" class="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">🛡️ Escudo</button>' +
+                                '<button onclick="openCreateSubTeamModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">➕ Crear Equipo</button>' +
+                                '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="mobile-nav-scroll pt-3 border-t border-slate-800/80">' +
+                            '<button onclick="clubSection=\'pitch\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection !== 'staff' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">⚽ Equipos del Club (0)</button>' +
+                            '<button onclick="clubSection=\'staff\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'staff' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👔 Cuerpo Técnico (' + clubStaffList.length + ')</button>' +
+                        '</div>' +
+                    '</header>' +
+                    emptyClubBody +
+                '</div>';
+            }
+
             if (!club.pitchMode) club.pitchMode = '5v5';
             var maxStarters = getMaxStarters(club);
 
@@ -1268,13 +1644,6 @@
                     roster.push(p);
                     if (p.starter) starters.push(p);
                     else bench.push(p);
-                }
-            }
-
-            var clubStaffList = [];
-            if (db.staff) {
-                for (var sIdx = 0; sIdx < db.staff.length; sIdx++) {
-                    if (db.staff[sIdx].teamId === club.id) clubStaffList.push(db.staff[sIdx]);
                 }
             }
 
@@ -1294,38 +1663,66 @@
             var coords = modeFormations[club.formation];
             var selectedPlayer = selectedPitchStarterId ? findPlayer(selectedPitchStarterId) : null;
 
-            // Cabecera del Club con las 7 Vistas Solicitadas + Personalización de Escudo
+            // Selector de Equipos / Categorías reales del Club
+            var subTeamButtonsHtml = '';
+            for (var fIdx = 0; fIdx < subTeams.length; fIdx++) {
+                var ft = subTeams[fIdx];
+                var isCur = (ft.id === club.id);
+                var ftPlayerCount = 0;
+                for (var pc = 0; pc < db.players.length; pc++) {
+                    if (db.players[pc].teamId === ft.id) ftPlayerCount++;
+                }
+                subTeamButtonsHtml += '<div class="inline-flex items-center rounded-xl border ' + (isCur ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-black' : 'bg-slate-950 text-slate-300 border-slate-800 font-bold') + '">' +
+                    '<button onclick="selectActiveClubTeam(\'' + ft.id + '\')" class="px-3 py-1.5 text-xs bg-transparent border-0 cursor-pointer ' + (isCur ? 'text-slate-950 font-black' : 'text-slate-200 font-bold') + '">' +
+                        '⚽ ' + ft.name + ' <span class="font-mono text-[10px] opacity-80">(' + (ft.category || 'Libre') + ' • ' + ftPlayerCount + ' jug.)</span>' +
+                    '</button>' +
+                    '<button onclick="event.stopPropagation(); handleDeleteSubTeam(\'' + ft.id + '\')" class="pr-2.5 pl-1 py-1.5 text-[11px] bg-transparent border-0 cursor-pointer ' + (isCur ? 'text-slate-950 hover:text-rose-900' : 'text-rose-400 hover:text-rose-300') + '" title="Eliminar equipo">✕</button>' +
+                '</div>';
+            }
+
+            // Cabecera del Club Completo + Selector de Equipos Reales + 7 Vistas
             var html = '' +
                 '<div class="space-y-5">' +
                     '<header class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-col gap-4">' +
                         '<div class="flex flex-wrap items-center justify-between gap-4">' +
                             '<div class="flex items-center gap-3.5">' +
-                                renderTeamBadgeHtml(club, 56) +
+                                renderTeamBadgeHtml(rootClub, 56) +
                                 '<div>' +
                                     '<div class="flex flex-wrap items-center gap-2">' +
-                                        '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase">Panel Oficial del Club</span>' +
-                                        '<span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-bold uppercase">Cancha ' + club.pitchMode + ' (' + starters.length + '/' + maxStarters + ' Titulares)</span>' +
-                                        '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-bold uppercase">' + enrolledTourneys.length + ' Torneo(s) Inscrito(s)</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase">🏛️ Club ' + rootClub.name + '</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold uppercase">🏷️ ' + (club.category || 'Categoría Libre') + '</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-bold uppercase">Cancha ' + club.pitchMode + ' (' + starters.length + '/' + maxStarters + ')</span>' +
+                                        '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-bold uppercase">' + enrolledTourneys.length + ' Torneo(s)</span>' +
                                     '</div>' +
                                     '<h1 class="text-xl sm:text-2xl font-black text-white m-0 mt-0.5">' + club.name + '</h1>' +
-                                    '<p class="text-xs text-slate-400 m-0">' + db.currentUser.name + ' • Plantel: ' + roster.length + ' jugadores • Cuerpo Técnico: ' + clubStaffList.length + ' integrantes</p>' +
+                                    '<p class="text-xs text-slate-400 m-0">' + db.currentUser.name + ' • Plantel: ' + roster.length + ' jugadores • Cuerpo Técnico del Club: ' + clubStaffList.length + ' integrantes</p>' +
                                 '</div>' +
                             '</div>' +
-                            '<div class="flex flex-wrap items-center gap-2">' +
-                                '<button onclick="openCustomizeClubModal()" class="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">🛡️ Escudo & Color</button>' +
-                                '<button onclick="openNewPlayerModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">+ Inscribir Jugador</button>' +
+                            '<div class="flex flex-wrap items-center gap-2 mobile-header-actions">' +
+                                '<button onclick="openCustomizeClubModal()" class="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">🛡️ Escudo & Cat.</button>' +
+                                '<button onclick="openNewPlayerModal()" class="btn-primary-gradient px-3.5 py-2 text-xs font-black">+ Jugador</button>' +
                                 '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
                             '</div>' +
                         '</div>' +
-                        '<!-- Barra de Navegación del Dueño del Club (7 Vistas) -->' +
-                        '<div class="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800/80">' +
-                            '<button onclick="clubSection=\'pitch\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'pitch' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">⚽ Pizarra 2D</button>' +
-                            '<button onclick="clubSection=\'squad\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'squad' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👥 Ver Plantel (' + roster.length + ')</button>' +
-                            '<button onclick="clubSection=\'staff\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'staff' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👔 Cuerpo Técnico (' + clubStaffList.length + ')</button>' +
-                            '<button onclick="clubSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'tournaments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Mis Torneos (' + enrolledTourneys.length + ')</button>' +
-                            '<button onclick="clubSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'calendar' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Próximos Partidos</button>' +
-                            '<button onclick="clubSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'standings' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Posiciones & Estadísticas</button>' +
-                            '<button onclick="clubSection=\'payments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'payments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">💳 Pagos & Solvencia</button>' +
+
+                        '<!-- Barra de Equipos del Club -->' +
+                        '<div class="p-3 rounded-2xl bg-slate-900/80 border border-cyan-500/25 space-y-2">' +
+                            '<div class="flex items-center justify-between gap-2">' +
+                                '<span class="text-[11px] font-mono uppercase text-cyan-400 font-black">⚽ Equipos de ' + rootClub.name + ' (' + subTeams.length + ')</span>' +
+                                '<button onclick="openCreateSubTeamModal()" class="px-2.5 py-1 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[11px] font-black cursor-pointer whitespace-nowrap">➕ Nuevo Equipo</button>' +
+                            '</div>' +
+                            '<div class="mobile-nav-scroll">' + subTeamButtonsHtml + '</div>' +
+                        '</div>' +
+
+                        '<!-- Barra de Navegación del Dueño del Club (7 Vistas — Deslizable en Móvil) -->' +
+                        '<div class="mobile-nav-scroll pt-3 border-t border-slate-800/80">' +
+                            '<button onclick="clubSection=\'pitch\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'pitch' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">⚽ Pizarra</button>' +
+                            '<button onclick="clubSection=\'squad\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'squad' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👥 Plantel (' + roster.length + ')</button>' +
+                            '<button onclick="clubSection=\'staff\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'staff' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">👔 Cuerpo Téc. (' + clubStaffList.length + ')</button>' +
+                            '<button onclick="clubSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'tournaments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Torneos (' + enrolledTourneys.length + ')</button>' +
+                            '<button onclick="clubSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'calendar' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Partidos</button>' +
+                            '<button onclick="clubSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'standings' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Posiciones</button>' +
+                            '<button onclick="clubSection=\'payments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (clubSection === 'payments' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">💳 Pagos</button>' +
                         '</div>' +
                     '</header>';
 
@@ -1498,9 +1895,9 @@
                 html += renderClubSquadSection(club, roster);
             }
 
-            // VISTA 3: CUERPO TÉCNICO (CON DOCUMENTOS PERTINENTES)
+            // VISTA 3: CUERPO TÉCNICO (ÚNICO PARA TODO EL CLUB / ESCUELA)
             if (clubSection === 'staff') {
-                html += renderClubStaffSection(club, clubStaffList);
+                html += renderClubStaffSection(rootClub || club, clubStaffList);
             }
 
             // VISTA 4: MIS TORNEOS CONECTADOS Y CONVOCATORIAS ABIERTAS
@@ -1648,16 +2045,35 @@
             '</div>';
         }
 
+        function normalizeCategoryKey(catStr) {
+            return String(catStr || 'Categoría Libre').trim().toLowerCase().replace(/\s+/g, ' ');
+        }
+
+        function doesTeamMatchTournamentCategory(teamObj, tourneyObj) {
+            if (!teamObj || !tourneyObj) return true;
+            var tCat = normalizeCategoryKey(tourneyObj.category || 'Categoría Libre');
+            var teamCat = normalizeCategoryKey(teamObj.category || 'Categoría Libre');
+            return tCat === teamCat;
+        }
+
         function renderClubTournamentsSection(club) {
             var connectedCards = '';
             var availableCards = '';
+            var clubCatLabel = club.category || 'Categoría Libre';
 
             for (var tIdx = 0; tIdx < db.tournaments.length; tIdx++) {
                 var tr = db.tournaments[tIdx];
                 var joined = (tr.teamIds.indexOf(club.id) !== -1);
+                var isMatchingCat = doesTeamMatchTournamentCategory(club, tr);
+                // Solo mostrar torneos que coincidan con la categoría del sub-equipo/equipo activo (o en los que ya esté inscrito)
+                if (!joined && !isMatchingCat) continue;
+
                 var cardHtml = '<div class="glass-panel p-5 border ' + (joined ? 'border-emerald-500/50' : 'border-slate-800') + ' space-y-3">' +
-                    '<div class="flex items-center justify-between">' +
-                        '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">Modalidad ' + tr.pitchSize + '</span>' +
+                    '<div class="flex flex-wrap items-center justify-between gap-1.5">' +
+                        '<div class="flex items-center gap-1.5">' +
+                            '<span class="px-2.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono text-xs font-bold">' + tr.pitchSize + '</span>' +
+                            '<span class="px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono text-xs font-bold">🏷️ ' + (tr.category || 'Categoría Libre') + '</span>' +
+                        '</div>' +
                         '<span class="px-2.5 py-0.5 rounded font-bold text-xs ' + (joined ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400') + '">' +
                             (joined ? '✓ CONECTADO / INSCRITO' : 'CONVOCATORIA ABIERTA') +
                         '</span>' +
@@ -1686,20 +2102,20 @@
             return '<div class="space-y-6">' +
                 '<div class="space-y-3">' +
                     '<div class="glass-panel p-4 border border-emerald-500/30">' +
-                        '<h2 class="text-base font-black text-white m-0">🟢 Torneos en los que ' + club.name + ' está Conectado</h2>' +
-                        '<p class="text-xs text-slate-400 m-0">Torneos activos donde participa tu club actualmente.</p>' +
+                        '<h2 class="text-base font-black text-white m-0">🟢 Torneos en los que ' + club.name + ' (' + clubCatLabel + ') está Inscrito</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Torneos activos donde participa esta categoría actualmente.</p>' +
                     '</div>' +
                     '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
-                        (connectedCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Tu club aún no está inscrito en ningún torneo. Únete a una convocatoria abajo.</div>') +
+                        (connectedCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Esta categoría aún no está inscrita en ningún torneo. Únete a una convocatoria de ' + clubCatLabel + ' abajo.</div>') +
                     '</div>' +
                 '</div>' +
                 '<div class="space-y-3">' +
                     '<div class="glass-panel p-4 border border-slate-800">' +
-                        '<h2 class="text-base font-black text-white m-0">📢 Otras Convocatorias Abiertas del Organizador</h2>' +
-                        '<p class="text-xs text-slate-400 m-0">Torneos disponibles para inscribir a tu club.</p>' +
+                        '<h2 class="text-base font-black text-white m-0">📢 Convocatorias Abiertas para Categoría ' + clubCatLabel + '</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Solo se muestran torneos oficiales de la misma categoría (<strong>' + clubCatLabel + '</strong>) para garantizar encuentros justos.</p>' +
                     '</div>' +
                     '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
-                        (availableCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">Ya estás inscrito en todos los torneos publicados actualmente.</div>') +
+                        (availableCards || '<div class="glass-panel p-6 text-center text-xs text-slate-400 md:col-span-2">No hay convocatorias abiertas para la categoría <strong>' + clubCatLabel + '</strong> en este momento.</div>') +
                     '</div>' +
                 '</div>' +
             '</div>';
@@ -1851,12 +2267,14 @@
         function renderClubPaymentsSection(club) {
             var list = db.payments || [];
             var myPayments = [];
-            var hasPending = false;
+            var unpaidCount = 0;
+            var pendingCount = 0;
 
             for (var i = 0; i < list.length; i++) {
                 if (list[i].teamId === club.id) {
                     myPayments.push(list[i]);
-                    if (list[i].status === 'pending') hasPending = true;
+                    if (list[i].status === 'unpaid' || list[i].status === 'rejected') unpaidCount++;
+                    else if (list[i].status === 'pending') pendingCount++;
                 }
             }
 
@@ -1865,40 +2283,51 @@
                 var py = myPayments[j];
                 var tr = findTournament(py.tournamentId);
                 var badge = py.status === 'approved'
-                    ? '<span class="px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black">✅ VERIFICADO / SOLVENTE</span>'
+                    ? '<span class="px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black">✅ PAGO VERIFICADO</span>'
                     : py.status === 'rejected'
-                        ? '<span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-black">❌ RECHAZADO</span>'
-                        : '<span class="px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-black">⏳ EN REVISIÓN</span>';
+                        ? '<span class="px-2.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-black">❌ NO VERIFICADO (RECHAZADO)</span>'
+                        : py.status === 'pending'
+                            ? '<span class="px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-black">⏳ NO VERIFICADO (EN REVISIÓN)</span>'
+                            : '<span class="px-2.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/40 text-[10px] font-black">⚠️ DEUDA POR PAGAR</span>';
 
-                rows += '<tr class="border-b border-slate-800/70">' +
+                var actionBtnHtml = '';
+                if (py.status === 'unpaid' || py.status === 'rejected') {
+                    actionBtnHtml = '<button onclick="openUploadDebtReceiptModal(\'' + py.id + '\')" class="btn-primary-gradient px-3 py-1.5 text-xs font-black">📤 Subir Comprobante</button>';
+                } else {
+                    actionBtnHtml = '<button onclick="openPaymentReceiptModal(\'' + py.id + '\')" class="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">🧾 Ver Comprobante</button>';
+                }
+
+                rows += '<tr class="border-b border-slate-800/70 ' + (py.status === 'unpaid' ? 'bg-rose-500/5' : '') + '">' +
                     '<td class="py-3 pl-2 font-bold text-white">' + py.concept + '<div class="text-[10px] text-slate-400">' + (tr ? tr.name : 'Liga F7 Caracas') + '</div></td>' +
                     '<td class="py-3 font-mono font-black text-emerald-400">' + py.amount + '</td>' +
-                    '<td class="py-3 text-xs text-slate-300">' + py.method + ' <span class="font-mono text-cyan-400">(' + py.reference + ')</span></td>' +
-                    '<td class="py-3 text-xs font-mono text-slate-400">' + py.date + '</td>' +
+                    '<td class="py-3 text-xs text-slate-300">' + (py.method || 'Por pagar') + (py.reference && py.reference !== 'Sin comprobante' ? ' <span class="font-mono text-cyan-400">(' + py.reference + ')</span>' : '') + '</td>' +
+                    '<td class="py-3 text-xs font-mono text-slate-300">' + py.date + '</td>' +
                     '<td class="py-3">' + badge + '</td>' +
-                    '<td class="py-3 text-right pr-2">' +
-                        '<button onclick="openPaymentReceiptModal(\'' + py.id + '\')" class="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-bold cursor-pointer">🧾 Ver Comprobante</button>' +
-                    '</td>' +
+                    '<td class="py-3 text-right pr-2">' + actionBtnHtml + '</td>' +
                 '</tr>';
             }
 
             if (!rows) {
-                rows = '<tr><td colspan="6" class="py-6 text-center text-xs text-slate-400">Aún no has reportado pagos de inscripción o arbitraje.</td></tr>';
+                rows = '<tr><td colspan="6" class="py-6 text-center text-xs text-slate-400">Aún no tienes deudas ni pagos registrados. Al inscribirte en un torneo se generará automáticamente tu deuda de inscripción y los arbitrajes por jornada.</td></tr>';
             }
+
+            var statusSummaryBadge = unpaidCount > 0
+                ? '<span class="px-2 py-0.5 rounded text-[10px] font-black bg-rose-500/20 text-rose-300 border border-rose-500/40">⚠️ ' + unpaidCount + ' DEUDA(S) POR PAGAR</span>'
+                : pendingCount > 0
+                    ? '<span class="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500/20 text-amber-300">⏳ ' + pendingCount + ' PAGO(S) NO VERIFICADO(S)</span>'
+                    : '<span class="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-emerald-400">✅ CLUB SOLVENTE AL DÍA</span>';
 
             return '<div class="space-y-4">' +
                 '<div class="glass-panel p-4 sm:p-5 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">' +
                     '<div>' +
-                        '<div class="flex items-center gap-2">' +
-                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Administración Financiera del Club</span>' +
-                            '<span class="px-2 py-0.5 rounded text-[10px] font-black ' + (hasPending ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-400') + '">' +
-                                (hasPending ? '⏳ PAGO EN VERIFICACIÓN' : '✅ CLUB SOLVENTE AL DÍA') +
-                            '</span>' +
+                        '<div class="flex flex-wrap items-center gap-2">' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Estado de Cuenta y Solvencia</span>' +
+                            statusSummaryBadge +
                         '</div>' +
-                        '<h2 class="text-lg font-black text-white m-0 mt-0.5">💳 Pagos de Inscripción y Arbitraje — ' + club.name + '</h2>' +
-                        '<p class="text-xs text-slate-400 m-0">Reporta tus pagos por Pago Móvil, Zelle, Transferencia o Efectivo adjuntando el capture del comprobante.</p>' +
+                        '<h2 class="text-lg font-black text-white m-0 mt-0.5">💳 Deudas y Pagos de Inscripción / Arbitraje — ' + club.name + '</h2>' +
+                        '<p class="text-xs text-slate-400 m-0">Al inscribirte en un torneo se crea la deuda de inscripción y al generarse las jornadas se añade el arbitraje de cada fecha. Sube tu capture para que el Organizador verifique el pago.</p>' +
                     '</div>' +
-                    '<button onclick="openNewPaymentModal()" class="btn-primary-gradient px-4 py-2.5 text-xs sm:text-sm font-black">➕ Reportar Nuevo Pago</button>' +
+                    '<button onclick="openNewPaymentModal()" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">➕ Reportar Otro Pago</button>' +
                 '</div>' +
                 '<div class="glass-panel p-4 sm:p-5 border border-slate-800 overflow-x-auto">' +
                     '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
@@ -1907,15 +2336,97 @@
                                 '<th class="py-2 pl-2">Concepto / Torneo</th>' +
                                 '<th class="py-2">Monto</th>' +
                                 '<th class="py-2">Método / Referencia</th>' +
-                                '<th class="py-2">Fecha</th>' +
+                                '<th class="py-2">Fecha / Jornada</th>' +
                                 '<th class="py-2">Estado</th>' +
-                                '<th class="py-2 text-right pr-2">Soporte</th>' +
+                                '<th class="py-2 text-right pr-2">Acción</th>' +
                             '</tr>' +
                         '</thead>' +
                         '<tbody>' + rows + '</tbody>' +
                     '</table>' +
                 '</div>' +
             '</div>';
+        }
+
+        function openUploadDebtReceiptModal(paymentId) {
+            var py = null;
+            var list = db.payments || [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i].id === paymentId) py = list[i];
+            }
+            if (!py) return;
+            pendingUploads = {};
+
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
+                        '<div>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Cancelar Deuda Pendiente • ' + py.amount + '</span>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">📤 Subir Comprobante — ' + py.concept + '</h3>' +
+                        '</div>' +
+                        '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<div class="p-3 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">' +
+                        '<div><span class="text-slate-400">Concepto:</span> <strong class="text-white">' + py.concept + '</strong></div>' +
+                        '<div><span class="text-slate-400">Fecha/Jornada:</span> <strong class="text-cyan-300 font-mono">' + py.date + '</strong></div>' +
+                        '<div><span class="text-slate-400">Monto:</span> <strong class="text-emerald-400 font-mono">' + py.amount + '</strong></div>' +
+                    '</div>' +
+                    '<form onsubmit="handleUploadDebtReceipt(event, \'' + py.id + '\')" class="space-y-3 text-xs">' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Método de Pago</label>' +
+                                '<select id="debt-pay-method" class="fallback-input">' +
+                                    '<option value="Pago Móvil">Pago Móvil</option>' +
+                                    '<option value="Zelle">Zelle</option>' +
+                                    '<option value="Transferencia Bancaria">Transferencia Bancaria</option>' +
+                                    '<option value="Efectivo Divisas">Efectivo Divisas</option>' +
+                                '</select>' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">N° de Referencia / Recibo <span class="text-rose-400">*</span></label>' +
+                                '<input type="text" id="debt-pay-ref" required placeholder="Ej: PM-982341" class="fallback-input font-mono">' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 space-y-2">' +
+                            '<label class="block font-black text-emerald-300">🧾 Capture del Comprobante de Pago <span class="text-rose-400">(Obligatorio *)</span></label>' +
+                            '<input type="file" accept="image/*" required onchange="handleDocFileSelect(this, \'debtReceipt\', \'st-debt-doc\', \'pr-debt-doc\')" class="text-xs text-slate-200 w-full">' +
+                            '<div id="st-debt-doc" class="text-[11px] text-amber-300">Adjunta la imagen del comprobante. Quedará en estado "No Verificado" hasta que el Organizador lo apruebe.</div>' +
+                            '<img id="pr-debt-doc" style="display:none; max-height:140px; border-radius:10px; border:1px solid #10B981;" alt="Comprobante">' +
+                        '</div>' +
+                        '<div class="flex justify-end gap-2 pt-2">' +
+                            '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
+                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Enviar Comprobante para Verificación</button>' +
+                        '</div>' +
+                    '</form>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function handleUploadDebtReceipt(e, paymentId) {
+            e.preventDefault();
+            var method = document.getElementById('debt-pay-method').value;
+            var ref = document.getElementById('debt-pay-ref').value.trim();
+            var receiptDoc = pendingUploads.debtReceipt || SAMPLE_DOC_SVG;
+
+            for (var i = 0; i < db.payments.length; i++) {
+                if (db.payments[i].id === paymentId) {
+                    db.payments[i].method = method;
+                    db.payments[i].reference = ref;
+                    db.payments[i].receiptDoc = receiptDoc;
+                    db.payments[i].hasReceiptDoc = true;
+                    db.payments[i].status = 'pending';
+                }
+            }
+            closeGlobalModal();
+            saveDB();
+            renderViewport();
+            apiRequest('PUT', '/api/payments/' + paymentId + '/receipt', {
+                method: method,
+                reference: ref,
+                receiptDoc: receiptDoc
+            });
+            notify('⏳ Comprobante enviado. Aparecerá como "No Verificado" hasta que el Organizador lo verifique.');
         }
 
         function updatePaymentDefaultAmount() {
@@ -1933,7 +2444,7 @@
         }
 
         function openNewPaymentModal() {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             pendingUploads = {};
             var tOpts = '';
             var firstTourney = db.tournaments.length > 0 ? db.tournaments[0] : null;
@@ -2007,7 +2518,7 @@
 
         function handleCreateClubPayment(e) {
             e.preventDefault();
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             var tourneyId = document.getElementById('pay-tourney').value;
             var concept = document.getElementById('pay-concept').value;
             var amount = document.getElementById('pay-amount').value.trim();
@@ -2045,7 +2556,8 @@
             }
             if (!py) return;
             if (!py.receiptDoc && typeof window.fetch === 'function' && window.location.protocol !== 'file:') {
-                window.fetch('/api/payments/' + paymentId + '/receipt')
+                var rHeaders = authToken ? { 'Authorization': 'Bearer ' + authToken } : {};
+                window.fetch('/api/payments/' + paymentId + '/receipt', { headers: rHeaders })
                     .then(function(r) { return r.ok ? r.json() : null; })
                     .then(function(d) {
                         if (d && d.receiptDoc) {
@@ -2085,7 +2597,14 @@
         // =========================================================================
 
         function openCustomizeClubModal() {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam() || getRootClubTeam();
+            var curCat = club.category || 'Categoría Libre';
+            var catOptions = ['Sub-6','Sub-8','Sub-10','Sub-11','Sub-12','Sub-13','Sub-14','Sub-15','Sub-17','Sub-20','Categoría Libre','Femenino Libre'];
+            var catOptsHtml = '';
+            for (var cIdx = 0; cIdx < catOptions.length; cIdx++) {
+                var co = catOptions[cIdx];
+                catOptsHtml += '<option value="' + co + '" ' + (curCat === co ? 'selected' : '') + '>' + co + '</option>';
+            }
             pendingUploads = {};
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
@@ -2095,7 +2614,7 @@
                     '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
                         '<div>' +
                             '<span class="text-[10px] font-mono uppercase text-cyan-400 font-bold">Identidad Oficial del Equipo</span>' +
-                            '<h3 class="text-base sm:text-lg font-black text-white m-0">🛡️ Personalizar Escudo y Colores de ' + club.name + '</h3>' +
+                            '<h3 class="text-base sm:text-lg font-black text-white m-0">🛡️ Personalizar Escudo, Categoría y Colores de ' + club.name + '</h3>' +
                         '</div>' +
                         '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
                     '</div>' +
@@ -2110,24 +2629,30 @@
                         '</div>' +
                         '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
                             '<div class="sm:col-span-2">' +
-                                '<label class="block font-bold text-slate-300 mb-1">Nombre Oficial del Club</label>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Nombre Oficial del Equipo / Categoría</label>' +
                                 '<input type="text" id="cust-club-name" required value="' + club.name + '" class="fallback-input">' +
                             '</div>' +
                             '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">Siglas (3 letras)</label>' +
-                                '<input type="text" id="cust-club-short" required maxlength="3" value="' + club.shortName + '" class="fallback-input uppercase font-mono font-bold">' +
+                                '<label class="block font-bold text-slate-300 mb-1">Siglas (Máx. 5)</label>' +
+                                '<input type="text" id="cust-club-short" required maxlength="5" value="' + club.shortName + '" class="fallback-input uppercase font-mono font-bold">' +
                             '</div>' +
                         '</div>' +
-                        '<div>' +
-                            '<label class="block font-bold text-slate-300 mb-1">Color Principal del Uniforme</label>' +
-                            '<div class="flex items-center gap-3">' +
-                                '<input type="color" id="cust-club-color" value="' + (club.color || '#10B981') + '" class="h-10 w-20 rounded-lg bg-slate-900 border border-slate-700 cursor-pointer">' +
-                                '<span class="text-slate-400 text-[11px]">Selecciona el color distintivo para las fichas en la Pizarra 2D y los carnets.</span>' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">🏷️ Categoría por Edad (Define límite de edad)</label>' +
+                                '<select id="cust-club-cat" class="fallback-input">' + catOptsHtml + '</select>' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Color Principal del Uniforme</label>' +
+                                '<div class="flex items-center gap-3">' +
+                                    '<input type="color" id="cust-club-color" value="' + (club.color || '#10B981') + '" class="h-10 w-20 rounded-lg bg-slate-900 border border-slate-700 cursor-pointer">' +
+                                    '<span class="text-slate-400 text-[11px]">Color para la Pizarra 2D y carnets.</span>' +
+                                '</div>' +
                             '</div>' +
                         '</div>' +
                         '<div class="flex justify-end gap-2 pt-2">' +
                             '<button type="button" onclick="closeGlobalModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold border-0 cursor-pointer">Cancelar</button>' +
-                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Guardar Identidad del Club</button>' +
+                            '<button type="submit" class="btn-primary-gradient px-5 py-2.5 text-xs sm:text-sm font-black">✅ Guardar Identidad del Equipo</button>' +
                         '</div>' +
                     '</form>' +
                 '</div>';
@@ -2136,10 +2661,12 @@
 
         function handleSaveClubCustomization(e) {
             e.preventDefault();
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam() || getRootClubTeam();
             club.name = document.getElementById('cust-club-name').value.trim() || club.name;
             club.shortName = (document.getElementById('cust-club-short').value.trim() || club.shortName).toUpperCase();
             club.color = document.getElementById('cust-club-color').value || club.color;
+            var catEl = document.getElementById('cust-club-cat');
+            if (catEl) club.category = catEl.value;
             if (pendingUploads.clubLogo) {
                 club.logoUrl = pendingUploads.clubLogo;
             }
@@ -2147,12 +2674,14 @@
             saveDB();
             renderViewport();
             apiRequest('PUT', '/api/teams/my-tactics', {
+                teamId: club.id,
                 name: club.name,
                 shortName: club.shortName,
+                category: club.category,
                 color: club.color,
                 logoUrl: club.logoUrl || null
             });
-            notify('🛡️ Escudo y colores de ' + club.name + ' actualizados');
+            notify('🛡️ Datos y categoría de ' + club.name + ' actualizados');
         }
 
         // =========================================================================
@@ -2392,7 +2921,7 @@
 
         // Lógica de Pizarra 2D y Bloqueo Estricto de Límite de Titulares (5v5, 7v7 y 11v11)
         function switchClubPitchMode(mode) {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             club.pitchMode = (mode === '11v11') ? '11v11' : (mode === '7v7') ? '7v7' : '5v5';
             club.formation = (club.pitchMode === '11v11') ? '4-3-3' : (club.pitchMode === '7v7') ? '2-3-1' : '1-2-1';
             var maxSt = getMaxStarters(club);
@@ -2422,12 +2951,12 @@
             selectedPitchStarterId = null;
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/teams/my-tactics', { pitchMode: club.pitchMode, formation: club.formation });
+            apiRequest('PUT', '/api/teams/my-tactics', { teamId: club.id, pitchMode: club.pitchMode, formation: club.formation });
             notify('🏟️ Pizarra ajustada a ' + club.pitchMode + ' (máximo ' + maxSt + ' titulares en cancha)');
         }
 
         function changeClubFormation(formName) {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             club.formation = formName;
             for (var i = 0; i < db.players.length; i++) {
                 if (db.players[i].teamId === club.id) {
@@ -2438,12 +2967,12 @@
             selectedPitchStarterId = null;
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/teams/my-tactics', { formation: formName });
+            apiRequest('PUT', '/api/teams/my-tactics', { teamId: club.id, formation: formName });
             notify('📐 Formación cambiada a ' + formName);
         }
 
         function resetPitchPositions() {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             for (var i = 0; i < db.players.length; i++) {
                 if (db.players[i].teamId === club.id) {
                     db.players[i].customX = null;
@@ -2453,7 +2982,7 @@
             selectedPitchStarterId = null;
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/teams/my-tactics', { resetPositions: true });
+            apiRequest('PUT', '/api/teams/my-tactics', { teamId: club.id, resetPositions: true });
             notify('📐 Jugadores alineados al dibujo táctico');
         }
 
@@ -2621,16 +3150,21 @@
         }
 
         function openNewPlayerModal() {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
+            if (!club) {
+                notify('⚠️ Primero crea un equipo/categoría dentro de tu club para inscribir jugadores.');
+                openCreateSubTeamModal();
+                return;
+            }
             pendingUploads = {};
             var suggestedDorsal = getFirstFreeDorsal(club.id);
             var occupied = getOccupiedDorsalsList(club.id);
 
-            // Cálculo automático contra calendario y fecha actual:
-            // Edad permitida estrictamente entre 9 años (mínimo) y 40 años (máximo)
+            // Cálculo dinámico de edad según la categoría del equipo / sub-equipo seleccionado
+            var bounds = getCategoryAgeBounds(club.category);
             var now = new Date();
-            var minYear = now.getFullYear() - 40;
-            var maxYear = now.getFullYear() - 9;
+            var minYear = now.getFullYear() - bounds.maxAge;
+            var maxYear = now.getFullYear() - bounds.minAge;
             var monthStr = String(now.getMonth() + 1).padStart(2, '0');
             var dayStr = String(now.getDate()).padStart(2, '0');
             var minBirthDate = minYear + '-' + monthStr + '-' + dayStr;
@@ -2644,7 +3178,7 @@
                 '<div class="space-y-4">' +
                     '<div class="flex items-center justify-between border-b border-slate-800 pb-3">' +
                         '<div>' +
-                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Inscripción Oficial de Jugador • ' + club.name + '</span>' +
+                            '<span class="text-[10px] font-mono uppercase text-emerald-400 font-bold">Inscripción Oficial • ' + club.name + ' (' + bounds.label + ')</span>' +
                             '<h3 class="text-base sm:text-lg font-black text-white m-0">➕ Registrar Nuevo Jugador y Expediente Documental</h3>' +
                         '</div>' +
                         '<button onclick="closeGlobalModal()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
@@ -2679,12 +3213,12 @@
                             '</div>' +
                         '</div>' +
 
-                        '<!-- Fecha de Nacimiento (Validada entre 9 y 40 años), Fecha de Ingreso a la Escuela y Posición -->' +
+                        '<!-- Fecha de Nacimiento (Validada dinámicamente según la categoría), Fecha de Ingreso y Posición -->' +
                         '<div class="grid grid-cols-1 sm:grid-cols-3 gap-3">' +
                             '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento (9 a 40 años) <span class="text-rose-400">*</span></label>' +
+                                '<label class="block font-bold text-slate-300 mb-1">Fecha de Nacimiento (' + bounds.minAge + ' a ' + bounds.maxAge + ' años) <span class="text-rose-400">*</span></label>' +
                                 '<input type="date" id="pl-birth-date" required min="' + minBirthDate + '" max="' + maxBirthDate + '" onchange="validateModalBirthDateLive()" class="fallback-input">' +
-                                '<div id="pl-birth-live-msg" class="text-[10px] text-slate-400 mt-1">Rango permitido: ' + minYear + ' a ' + maxYear + ' (9 a 40 años)</div>' +
+                                '<div id="pl-birth-live-msg" class="text-[10px] text-slate-400 mt-1">Categoría ' + bounds.label + ': ' + minYear + ' a ' + maxYear + ' (' + bounds.minAge + ' a ' + bounds.maxAge + ' años)</div>' +
                             '</div>' +
                             '<div>' +
                                 '<label class="block font-bold text-slate-300 mb-1">Ingreso a la Escuela <span class="text-rose-400">*</span></label>' +
@@ -2818,16 +3352,18 @@
         }
 
         function validateModalBirthDateLive() {
+            var club = getActiveClubTeam();
+            var bounds = getCategoryAgeBounds(club ? club.category : '');
             var inputEl = document.getElementById('pl-birth-date');
             var msgEl = document.getElementById('pl-birth-live-msg');
             if (!inputEl || !msgEl) return;
             var age = computeExactAgeYears(inputEl.value);
-            if (age < 9) {
-                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido: el jugador tiene ' + (age < 0 ? 0 : age) + ' años (mínimo 9 años cumplidos).</span>';
-            } else if (age > 40) {
-                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido: el jugador tiene ' + age + ' años (máximo 40 años).</span>';
+            if (age < bounds.minAge) {
+                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido para ' + bounds.label + ': el jugador tiene ' + (age < 0 ? 0 : age) + ' años (mínimo ' + bounds.minAge + ' años).</span>';
+            } else if (age > bounds.maxAge) {
+                msgEl.innerHTML = '<span class="text-rose-400 font-bold">❌ No permitido para ' + bounds.label + ': el jugador tiene ' + age + ' años (máximo ' + bounds.maxAge + ' años).</span>';
             } else {
-                msgEl.innerHTML = '<span class="text-emerald-400 font-bold">✅ Edad válida: ' + age + ' años.</span>';
+                msgEl.innerHTML = '<span class="text-emerald-400 font-bold">✅ Edad válida para ' + bounds.label + ': ' + age + ' años.</span>';
             }
         }
 
@@ -2839,7 +3375,7 @@
         }
 
         function checkModalDorsalAvailability() {
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
             var inputEl = document.getElementById('pl-dorsal');
             var statusEl = document.getElementById('dorsal-live-status');
             if (!inputEl || !statusEl) return;
@@ -2852,7 +3388,7 @@
             if (existing) {
                 statusEl.innerHTML = '<span class="text-rose-400">❌ Ocupado por <strong>' + existing.name + '</strong>. Elige otro dorsal.</span>';
             } else {
-                statusEl.innerHTML = '<span class="text-emerald-400">✅ Dorsal #' + val + ' disponible en ' + club.shortName + '</span>';
+                statusEl.innerHTML = '<span class="text-emerald-400">✅ Dorsal #' + val + ' disponible en ' + club.name + '</span>';
             }
         }
 
@@ -2865,7 +3401,8 @@
 
         function handleCreatePlayerWithDocs(e) {
             e.preventDefault();
-            var club = findTeam(db.currentUser.teamId);
+            var club = getActiveClubTeam();
+            var bounds = getCategoryAgeBounds(club ? club.category : '');
             var errEl = document.getElementById('pl-form-error');
             if (errEl) errEl.style.display = 'none';
 
@@ -2881,11 +3418,11 @@
             var hasSpecial = (document.getElementById('pl-has-special').value === 'yes');
             var specialDetail = document.getElementById('pl-special-detail').value.trim();
 
-            // Validación estricta de fecha de nacimiento contra calendario actual (entre 9 y 40 años)
+            // Validación dinámica de fecha de nacimiento según la categoría del equipo/sub-equipo
             var ageYears = computeExactAgeYears(birthDate);
-            if (ageYears < 9 || ageYears > 40) {
+            if (ageYears < bounds.minAge || ageYears > bounds.maxAge) {
                 if (errEl) {
-                    errEl.textContent = '❌ Fecha de nacimiento inválida (' + (ageYears < 0 ? 'fecha futura' : ageYears + ' años') + '): el jugador debe tener entre 9 años (mínimo) y 40 años (máximo) según la fecha actual.';
+                    errEl.textContent = '❌ Fecha de nacimiento inválida (' + (ageYears < 0 ? 'fecha futura' : ageYears + ' años') + '): para la categoría ' + bounds.label + ' el jugador debe tener entre ' + bounds.minAge + ' y ' + bounds.maxAge + ' años según la fecha actual.';
                     errEl.style.display = 'block';
                 }
                 return;
@@ -3296,20 +3833,76 @@
             notify('🗑️ Integrante retirado del cuerpo técnico');
         }
 
+        function ensureLocalEnrollmentDebt(tourney, teamId) {
+            if (!tourney || !teamId) return;
+            if (!db.payments) db.payments = [];
+            for (var i = 0; i < db.payments.length; i++) {
+                var py = db.payments[i];
+                if (py.teamId === teamId && py.tournamentId === tourney.id && !py.matchId && String(py.concept || '').indexOf('Inscripción') === 0) {
+                    return;
+                }
+            }
+            db.payments.unshift({
+                id: 'pay-reg-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+                teamId: teamId,
+                tournamentId: tourney.id,
+                matchId: null,
+                concept: 'Inscripción Oficial — ' + tourney.name,
+                amount: tourney.registrationFee || '$150 USD',
+                method: 'Por pagar',
+                reference: 'Sin comprobante',
+                date: tourney.startDate || 'Por pagar',
+                hasReceiptDoc: false,
+                status: 'unpaid'
+            });
+        }
+
+        function removeLocalUnpaidEnrollmentDebt(tourneyId, teamId) {
+            if (!db.payments) return;
+            db.payments = db.payments.filter(function(py) {
+                return !(py.teamId === teamId && py.tournamentId === tourneyId && !py.matchId && py.status === 'unpaid');
+            });
+        }
+
+        function createLocalMatchRefereeDebts(tourney, matchObj) {
+            if (!tourney || !matchObj) return;
+            if (!db.payments) db.payments = [];
+            var fee = tourney.refereeFee || '$20 USD';
+            var teamsPair = [matchObj.homeId, matchObj.awayId];
+            for (var i = 0; i < teamsPair.length; i++) {
+                db.payments.unshift({
+                    id: 'pay-ref-' + Date.now() + '-' + i + '-' + Math.floor(Math.random() * 1000),
+                    teamId: teamsPair[i],
+                    tournamentId: tourney.id,
+                    matchId: matchObj.id,
+                    concept: 'Arbitraje — ' + (matchObj.round || 'Jornada'),
+                    amount: fee,
+                    method: 'Por pagar',
+                    reference: 'Sin comprobante',
+                    date: matchObj.date || tourney.startDate || 'Por definir',
+                    hasReceiptDoc: false,
+                    status: 'unpaid'
+                });
+            }
+        }
+
         function toggleClubInTournament(tourneyId) {
             var t = findTournament(tourneyId);
-            var clubId = db.currentUser.teamId;
+            var club = getActiveClubTeam();
+            var clubId = club ? club.id : db.currentUser.teamId;
             var idx = t.teamIds.indexOf(clubId);
             if (idx === -1) {
                 t.teamIds.push(clubId);
-                notify('🎉 Tu club se unió al torneo ' + t.name);
+                ensureLocalEnrollmentDebt(t, clubId);
+                notify('🎉 ' + (club ? club.name : 'Tu equipo') + ' se unió a ' + t.name + '. Se generó tu deuda de inscripción en "💳 Pagos".');
             } else {
                 t.teamIds.splice(idx, 1);
-                notify('🚪 Tu club se retiró del torneo');
+                removeLocalUnpaidEnrollmentDebt(t.id, clubId);
+                notify('🚪 ' + (club ? club.name : 'Tu equipo') + ' se retiró del torneo');
             }
             saveDB();
             renderViewport();
-            apiRequest('POST', '/api/tournaments/' + tourneyId + '/toggle-enrollment');
+            apiRequest('POST', '/api/tournaments/' + tourneyId + '/toggle-enrollment', { teamId: clubId });
         }
 
         // =========================================================================
@@ -3404,7 +3997,8 @@
                     }
                 }
 
-                var clockText = String(activeMatch.minute || 0).padStart(2, '0') + ':' + String(timerSeconds).padStart(2, '0');
+                var clockText = formatClockMMSS(getMatchLiveElapsedSeconds(activeMatch));
+                var isMatchClockRunning = Boolean(activeMatch.status === 'live' && activeMatch.clockRunning);
                 var isTiedScore = (activeMatch.homeScore || 0) === (activeMatch.awayScore || 0);
                 var hasPenaltiesRecorded = (activeMatch.homePenalties !== null && activeMatch.homePenalties !== undefined && activeMatch.awayPenalties !== null && activeMatch.awayPenalties !== undefined);
 
@@ -3415,7 +4009,7 @@
                                 '<span class="text-xs font-mono text-amber-400 font-bold">' + activeMatch.round + ' • ' + activeMatch.pitch + '</span>' +
                                 '<h3 class="text-lg font-black text-white m-0">' + homeTeam.name + ' vs ' + awayTeam.name + '</h3>' +
                             '</div>' +
-                            '<div class="px-4 py-2 rounded-2xl bg-slate-950 border border-slate-800 font-mono text-xl font-black text-emerald-400" id="ref-clock-display">' +
+                            '<div class="px-4 py-2 rounded-2xl bg-slate-950 border border-slate-800 font-mono text-xl font-black text-emerald-400" id="ref-clock-display" data-match-id="' + activeMatch.id + '">' +
                                 clockText +
                             '</div>' +
                         '</div>' +
@@ -3467,8 +4061,8 @@
                             '<div class="space-y-4">' +
                                 '<div class="flex flex-wrap items-center justify-between gap-2 bg-slate-900 p-3 rounded-2xl border border-slate-800">' +
                                     '<div class="flex flex-wrap items-center gap-2">' +
-                                        '<button onclick="toggleRefTimer(\'' + activeMatch.id + '\')" class="px-3.5 py-2 rounded-xl text-xs font-black cursor-pointer border-0 ' + (timerRunning ? 'bg-amber-500 text-slate-950' : 'bg-emerald-500 text-slate-950') + '">' +
-                                            (timerRunning ? '⏸ Pausar Reloj' : '▶ Iniciar Reloj') +
+                                        '<button onclick="toggleRefTimer(\'' + activeMatch.id + '\')" class="px-3.5 py-2 rounded-xl text-xs font-black cursor-pointer border-0 ' + (isMatchClockRunning ? 'bg-amber-500 text-slate-950' : 'bg-emerald-500 text-slate-950') + '">' +
+                                            (isMatchClockRunning ? '⏸ Pausar Reloj' : '▶ Iniciar Reloj') +
                                         '</button>' +
                                         '<button onclick="refResetTimer(\'' + activeMatch.id + '\')" class="px-3 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-extrabold cursor-pointer">🔄 Reiniciar Tiempo (00:00)</button>' +
                                         '<select onchange="refChangePeriod(\'' + activeMatch.id + '\', this.value)" class="px-2.5 py-1.5 rounded-xl bg-slate-950 text-amber-300 border border-slate-700 text-xs font-mono font-bold">' +
@@ -3662,22 +4256,31 @@
         }
 
         function refSetMatchState(matchId, newState) {
-            stopRefTimer();
             var targetMinute = 0;
+            var targetElapsed = 0;
             var targetMatch = null;
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
                     targetMatch = db.matches[i];
-                    // Si un partido programado o suspendido pasa a EN VIVO, el reloj empieza exactamente en 00:00
+                    // Si un partido programado pasa a EN VIVO, el reloj empieza exactamente en 00:00 (pausado hasta pulsar Iniciar Reloj)
                     if (newState === 'live' && (targetMatch.status === 'scheduled' || targetMatch.status === 'suspended')) {
                         targetMatch.minute = 0;
-                        timerSeconds = 0;
+                        targetMatch.clockRunning = false;
+                        targetMatch.clockStartedAt = null;
+                        targetMatch.clockElapsedSec = 0;
+                    } else if (newState === 'finished') {
+                        targetElapsed = getMatchLiveElapsedSeconds(targetMatch);
+                        targetMatch.clockElapsedSec = targetElapsed;
+                        targetMatch.minute = Math.floor(targetElapsed / 60);
+                        targetMatch.clockRunning = false;
+                        targetMatch.clockStartedAt = null;
                     }
                     targetMatch.status = newState;
                     if (newState === 'live') {
                         targetMatch.suspensionReason = null;
                     }
                     targetMinute = targetMatch.minute || 0;
+                    targetElapsed = targetMatch.clockElapsedSec || 0;
                 }
             }
             if (newState === 'finished' && targetMatch) {
@@ -3688,6 +4291,9 @@
             apiRequest('PUT', '/api/matches/' + matchId + '/state', {
                 status: newState,
                 minute: targetMinute,
+                clockRunning: false,
+                clockStartedAt: null,
+                clockElapsedSec: targetElapsed,
                 suspensionReason: newState === 'live' ? null : undefined
             });
             notify(newState === 'live' ? '🟢 Partido en vivo (Reloj en 00:00 — pulsa Iniciar Reloj)' : '🏁 Partido finalizado oficialmente');
@@ -4020,23 +4626,22 @@
         }
 
         function refResetTimer(matchId) {
-            stopRefTimer();
-            timerSeconds = 0;
             for (var i = 0; i < db.matches.length; i++) {
                 if (db.matches[i].id === matchId) {
                     db.matches[i].minute = 0;
+                    db.matches[i].clockRunning = false;
+                    db.matches[i].clockStartedAt = null;
+                    db.matches[i].clockElapsedSec = 0;
                 }
-            }
-            if (socket) {
-                socket.emit('referee_clock_tick', {
-                    matchId: matchId,
-                    minute: 0,
-                    seconds: 0
-                });
             }
             saveDB();
             renderViewport();
-            apiRequest('PUT', '/api/matches/' + matchId + '/state', { minute: 0 });
+            apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                minute: 0,
+                clockRunning: false,
+                clockStartedAt: null,
+                clockElapsedSec: 0
+            });
             notify('🔄 Cronómetro del partido reiniciado a 00:00');
         }
 
@@ -4066,41 +4671,45 @@
         }
 
         function toggleRefTimer(matchId) {
-            if (timerRunning) {
-                stopRefTimer();
-                renderViewport();
-                return;
+            var target = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) target = db.matches[i];
             }
-            timerRunning = true;
-            timerInterval = setInterval(function() {
-                var target = null;
-                for (var i = 0; i < db.matches.length; i++) {
-                    if (db.matches[i].id === matchId) target = db.matches[i];
-                }
-                if (!target || target.status !== 'live') {
-                    stopRefTimer();
-                    return;
-                }
-                timerSeconds++;
-                if (timerSeconds >= 60) {
-                    timerSeconds = 0;
-                    target.minute = (target.minute || 0) + 1;
-                    saveDB();
-                    apiRequest('PUT', '/api/matches/' + matchId + '/state', { minute: target.minute, tickOnly: true });
-                }
-                if (socket) {
-                    socket.emit('referee_clock_tick', {
-                        matchId: matchId,
-                        minute: target.minute || 0,
-                        seconds: timerSeconds
-                    });
-                }
-                var el = document.getElementById('ref-clock-display');
-                if (el) {
-                    el.textContent = String(target.minute || 0).padStart(2, '0') + ':' + String(timerSeconds).padStart(2, '0');
-                }
-            }, 1000);
-            renderViewport();
+            if (!target || target.status !== 'live') return;
+
+            if (target.clockRunning) {
+                // Pausar y guardar segundos acumulados en PostgreSQL
+                var elapsedNow = getMatchLiveElapsedSeconds(target);
+                target.clockElapsedSec = elapsedNow;
+                target.minute = Math.floor(elapsedNow / 60);
+                target.clockRunning = false;
+                target.clockStartedAt = null;
+                saveDB();
+                renderViewport();
+                apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                    minute: target.minute,
+                    clockRunning: false,
+                    clockStartedAt: null,
+                    clockElapsedSec: elapsedNow
+                });
+                notify('⏸ Cronómetro pausado en ' + formatClockMMSS(elapsedNow));
+            } else {
+                // Iniciar / reanudar: guardar timestamp UTC en PostgreSQL para que siga corriendo aunque se cierre la ventana o sesión
+                var startTs = Date.now();
+                var baseSec = (typeof target.clockElapsedSec === 'number') ? target.clockElapsedSec : ((target.minute || 0) * 60);
+                target.clockElapsedSec = baseSec;
+                target.clockRunning = true;
+                target.clockStartedAt = startTs;
+                saveDB();
+                renderViewport();
+                apiRequest('PUT', '/api/matches/' + matchId + '/state', {
+                    minute: Math.floor(baseSec / 60),
+                    clockRunning: true,
+                    clockStartedAt: startTs,
+                    clockElapsedSec: baseSec
+                });
+                notify('▶ Cronómetro iniciado (seguirá corriendo en el servidor aunque cierres la ventana)');
+            }
         }
 
         function stopRefTimer() {
@@ -4238,11 +4847,14 @@
                 for (var j = 0; j < db.teams.length; j++) {
                     var c = db.teams[j];
                     var isEnrolled = (t.teamIds.indexOf(c.id) !== -1);
+                    // Solo los equipos creados dentro de cada club (parentTeamId != null) compiten en torneos
+                    if (!isEnrolled && !c.parentTeamId) continue;
+                    if (!isEnrolled && !doesTeamMatchTournamentCategory(c, t)) continue;
                     clubTags += '<button onclick="toggleAdminClubInTourney(\'' + t.id + '\', \'' + c.id + '\')" class="px-2.5 py-1 rounded-lg border text-xs font-bold cursor-pointer transition ' +
                         (isEnrolled
                             ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                            : 'bg-slate-950 border-slate-800 text-slate-500 hover:text-slate-300') + '">' +
-                        (isEnrolled ? '✓ ' : '+ ') + c.name +
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200') + '">' +
+                        (isEnrolled ? '✓ ' : '+ ') + c.name + ' <span class="text-[10px] opacity-75">(' + (c.category || 'Libre') + ')</span>' +
                     '</button>';
                 }
 
@@ -4310,12 +4922,17 @@
                                     '<div>' +
                                         '<label class="block text-xs font-bold text-slate-300 mb-1">Categoría por Edad</label>' +
                                         '<select id="adm-t-cat" class="fallback-input">' +
-                                            '<option value="Categoría Libre">Categoría Libre / Adultos</option>' +
-                                            '<option value="Sub-20">Sub-20 (Juvenil)</option>' +
-                                            '<option value="Sub-17">Sub-17 (Cadete)</option>' +
-                                            '<option value="Sub-15">Sub-15 (Infantil A)</option>' +
-                                            '<option value="Sub-13">Sub-13 (Infantil B)</option>' +
-                                            '<option value="Sub-11">Sub-11 (Pre-Infantil)</option>' +
+                                            '<option value="Sub-6">Sub-6 (4 a 6 años)</option>' +
+                                            '<option value="Sub-8">Sub-8 (4 a 8 años)</option>' +
+                                            '<option value="Sub-10">Sub-10 (6 a 10 años)</option>' +
+                                            '<option value="Sub-11">Sub-11 (7 a 11 años)</option>' +
+                                            '<option value="Sub-12">Sub-12 (8 a 12 años)</option>' +
+                                            '<option value="Sub-13">Sub-13 (9 a 13 años)</option>' +
+                                            '<option value="Sub-14">Sub-14 (10 a 14 años)</option>' +
+                                            '<option value="Sub-15">Sub-15 (11 a 15 años)</option>' +
+                                            '<option value="Sub-17">Sub-17 (13 a 17 años)</option>' +
+                                            '<option value="Sub-20">Sub-20 (16 a 20 años)</option>' +
+                                            '<option value="Categoría Libre" selected>Categoría Libre / Adultos</option>' +
                                             '<option value="Femenino Libre">Femenino Libre</option>' +
                                         '</select>' +
                                     '</div>' +
@@ -4364,6 +4981,11 @@
                 bodyHtml = renderTournamentBarHtml() + renderStandingsTableHtml(activeTourneyId) + renderPlayoffsBracketHtml(activeTourneyId) + renderTournamentStatsGridHtml(activeTourneyId);
             }
 
+            var rootClubCount = 0;
+            for (var rc = 0; rc < db.teams.length; rc++) {
+                if (!db.teams[rc].parentTeamId) rootClubCount++;
+            }
+
             return '' +
                 '<div class="space-y-5">' +
                     '<header class="glass-panel p-4 sm:p-5 border border-purple-500/30 flex flex-wrap items-center justify-between gap-4">' +
@@ -4374,13 +4996,13 @@
                                 '<h1 class="text-xl font-black text-white m-0 mt-0.5">' + db.currentUser.name + '</h1>' +
                             '</div>' +
                         '</div>' +
-                        '<div class="flex flex-wrap gap-2">' +
-                            '<button onclick="openAdminSecurityModal()" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🔐 Árbitros & Mi Clave</button>' +
+                        '<div class="mobile-nav-scroll pt-2 border-t border-slate-800/80 sm:border-0 sm:pt-0">' +
+                            '<button onclick="openAdminSecurityModal()" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🔐 Árbitros</button>' +
                             '<button onclick="adminSection=\'tournaments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'tournaments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🏆 Torneos</button>' +
-                            '<button onclick="adminSection=\'audit\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'audit' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🛡️ Clubes & Auditoría (' + db.teams.length + ')</button>' +
-                            '<button onclick="adminSection=\'payments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'payments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">💳 Finanzas & Solvencia</button>' +
+                            '<button onclick="adminSection=\'audit\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'audit' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">🛡️ Clubes (' + rootClubCount + ')</button>' +
+                            '<button onclick="adminSection=\'payments\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'payments' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">💳 Finanzas</button>' +
                             '<button onclick="adminSection=\'calendar\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'calendar' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📅 Calendario</button>' +
-                            '<button onclick="adminSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'standings' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Posiciones, Goleadores & Sanciones</button>' +
+                            '<button onclick="adminSection=\'standings\'; renderViewport();" class="px-3 py-2 rounded-xl text-xs font-extrabold cursor-pointer border ' + (adminSection === 'standings' ? 'bg-purple-500 text-slate-950 border-purple-400' : 'bg-slate-900 text-slate-300 border-slate-800') + '">📊 Posiciones</button>' +
                             '<button onclick="logoutSession()" class="px-3.5 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-extrabold cursor-pointer">Salir</button>' +
                         '</div>' +
                     '</header>' +
@@ -4395,20 +5017,85 @@
                     '<button onclick="openRegisterClubModal()" class="btn-primary-gradient px-5 py-2.5 text-xs font-black">➕ Dar de Alta Primer Club y Crear sus Credenciales</button>' +
                 '</div>';
             }
-            if (!selectedAuditClubId || findTeam(selectedAuditClubId).id !== selectedAuditClubId || db.teams.map(function(x){return x.id;}).indexOf(selectedAuditClubId) === -1) {
-                selectedAuditClubId = db.teams[0].id;
+
+            // Filtrar SOLO los Clubes Principales (sin sub-equipos en la lista principal de Clubes Afiliados)
+            var rootClubs = [];
+            for (var rIdx = 0; rIdx < db.teams.length; rIdx++) {
+                if (!db.teams[rIdx].parentTeamId) rootClubs.push(db.teams[rIdx]);
             }
+            if (rootClubs.length === 0) rootClubs = db.teams.slice();
+
+            var selectedTeamObj = null;
+            for (var sFind = 0; sFind < db.teams.length; sFind++) {
+                if (db.teams[sFind].id === selectedAuditClubId) selectedTeamObj = db.teams[sFind];
+            }
+            if (!selectedTeamObj) {
+                selectedTeamObj = rootClubs[0];
+                selectedAuditClubId = selectedTeamObj.id;
+            }
+
+            var activeRootId = selectedTeamObj.parentTeamId || selectedTeamObj.id;
+            var activeRootClub = findTeam(activeRootId);
+
+            // Sub-equipos / categorías del club principal seleccionado
+            var activeSubTeams = [];
+            for (var stIdx = 0; stIdx < db.teams.length; stIdx++) {
+                if (db.teams[stIdx].parentTeamId === activeRootId) {
+                    activeSubTeams.push(db.teams[stIdx]);
+                }
+            }
+
+            // Botones de Clubes Afiliados (solo instituciones madre)
             var clubButtons = '';
-            for (var i = 0; i < db.teams.length; i++) {
-                var tm = db.teams[i];
-                var isSel = (tm.id === selectedAuditClubId);
-                clubButtons += '<button onclick="selectedAuditClubId=\'' + tm.id + '\'; renderViewport();" class="px-3.5 py-2 rounded-xl text-xs font-bold cursor-pointer border ' +
-                    (isSel ? 'bg-purple-500 text-slate-950 border-purple-400 font-black' : 'bg-slate-900 text-slate-300 border-slate-800') + '">' +
-                    tm.name + ' (' + tm.shortName + ')' +
+            for (var i = 0; i < rootClubs.length; i++) {
+                var tm = rootClubs[i];
+                var isSelRoot = (tm.id === activeRootId);
+                var subCount = 0;
+                for (var sc = 0; sc < db.teams.length; sc++) {
+                    if (db.teams[sc].parentTeamId === tm.id) subCount++;
+                }
+                clubButtons += '<button onclick="selectedAuditClubId=\'' + tm.id + '\'; renderViewport();" class="px-3.5 py-2 rounded-xl text-xs font-bold cursor-pointer border transition ' +
+                    (isSelRoot ? 'bg-purple-500 text-slate-950 border-purple-400 font-black' : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-purple-500/40') + '">' +
+                    '🏛️ ' + tm.name + ' (' + tm.shortName + ')' +
+                    ' <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-950/30 font-mono text-[10px]">▾ ' + subCount + ' eq.</span>' +
                 '</button>';
             }
 
-            var club = findTeam(selectedAuditClubId);
+            // Si el club seleccionado tiene equipos creados y estaba seleccionado el club madre, enfocar automáticamente el primer equipo real
+            if (selectedTeamObj.id === activeRootId && activeSubTeams.length > 0) {
+                selectedTeamObj = activeSubTeams[0];
+                selectedAuditClubId = selectedTeamObj.id;
+            }
+
+            // Barra desplegable debajo del club afiliado con SOLO sus equipos creados
+            var subTeamsDropdownHtml = '';
+            if (activeSubTeams.length > 0) {
+                var subBtns = '';
+                for (var fIdx = 0; fIdx < activeSubTeams.length; fIdx++) {
+                    var ft = activeSubTeams[fIdx];
+                    var isSelSub = (ft.id === selectedTeamObj.id);
+                    var pCount = 0;
+                    for (var pc = 0; pc < db.players.length; pc++) {
+                        if (db.players[pc].teamId === ft.id) pCount++;
+                    }
+                    subBtns += '<button onclick="selectedAuditClubId=\'' + ft.id + '\'; renderViewport();" class="px-3 py-1.5 rounded-xl text-xs font-bold cursor-pointer border transition ' +
+                        (isSelSub ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-black' : 'bg-slate-950 text-slate-300 border-slate-800 hover:text-white') + '">' +
+                        '⚽ ' + ft.name + ' <span class="font-mono text-[10px] opacity-80">(' + (ft.category || 'Libre') + ' • ' + pCount + ' jug.)</span>' +
+                    '</button>';
+                }
+                subTeamsDropdownHtml = '' +
+                    '<div class="mt-3 pt-3 border-t border-purple-500/25 space-y-2">' +
+                        '<div class="text-[11px] font-mono uppercase text-cyan-400 font-black">↳ Equipos registrados en ' + activeRootClub.name + ' (' + activeSubTeams.length + '):</div>' +
+                        '<div class="mobile-nav-scroll">' + subBtns + '</div>' +
+                    '</div>';
+            } else {
+                subTeamsDropdownHtml = '' +
+                    '<div class="mt-3 pt-3 border-t border-purple-500/25 text-xs text-slate-400">' +
+                        'ℹ️ El club <strong class="text-white">' + activeRootClub.name + '</strong> aún no ha creado equipos por categoría desde su panel.' +
+                    '</div>';
+            }
+
+            var club = selectedTeamObj;
             var playerRows = '';
             for (var pIdx = 0; pIdx < db.players.length; pIdx++) {
                 var p = db.players[pIdx];
@@ -4447,11 +5134,12 @@
                 '</tr>';
             }
 
+            var staffOwnerTeamId = activeRootId;
             var staffRows = '';
             if (db.staff) {
                 for (var sIdx = 0; sIdx < db.staff.length; sIdx++) {
                     var st = db.staff[sIdx];
-                    if (st.teamId !== club.id) continue;
+                    if (st.teamId !== staffOwnerTeamId) continue;
                     staffRows += '<div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">' +
                         '<div>' +
                             '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[10px] mr-2">' + st.roleTitle + '</span>' +
@@ -4464,28 +5152,35 @@
             }
 
             if (!playerRows) {
-                playerRows = '<tr><td colspan="7" class="py-5 text-center text-xs text-slate-400">Este club aún no ha inscrito jugadores en su plantilla.</td></tr>';
+                playerRows = '<tr><td colspan="7" class="py-5 text-center text-xs text-slate-400">Esta categoría aún no ha inscrito jugadores en su plantilla.</td></tr>';
             }
 
             return '<div class="space-y-5">' +
-                '<div class="glass-panel p-4 border border-purple-500/30 flex flex-wrap items-center justify-between gap-3">' +
-                    '<div class="space-y-1">' +
-                        '<span class="text-xs font-extrabold uppercase text-purple-300 block">🛡️ Clubes Afiliados (' + db.teams.length + ') — Selecciona un Club:</span>' +
-                        '<div class="flex flex-wrap gap-2">' + clubButtons + '</div>' +
+                '<div class="glass-panel p-4 border border-purple-500/30 space-y-2">' +
+                    '<div class="flex flex-wrap items-center justify-between gap-3">' +
+                        '<div class="space-y-1.5 flex-1 min-w-0">' +
+                            '<span class="text-xs font-extrabold uppercase text-purple-300 block">🛡️ Clubes Afiliados (' + rootClubs.length + ') — Haz clic en un club para desplegar sus categorías:</span>' +
+                            '<div class="mobile-nav-scroll">' + clubButtons + '</div>' +
+                        '</div>' +
+                        '<button onclick="openRegisterClubModal()" class="btn-primary-gradient px-4 py-2.5 text-xs font-black shrink-0">➕ Registrar Nuevo Club</button>' +
                     '</div>' +
-                    '<button onclick="openRegisterClubModal()" class="btn-primary-gradient px-4 py-2.5 text-xs font-black">➕ Registrar Nuevo Club</button>' +
+                    subTeamsDropdownHtml +
                 '</div>' +
                 '<div class="glass-panel p-4 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">' +
                     '<div class="flex items-center gap-3">' +
                         renderTeamBadgeHtml(club, 44) +
                         '<div>' +
+                            '<div class="flex flex-wrap items-center gap-1.5 mb-0.5">' +
+                                '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono text-[10px] font-bold">🏷️ ' + (club.category || 'Categoría Libre') + '</span>' +
+                                (club.parentTeamId ? '<span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-bold">Sub-equipo de ' + activeRootClub.name + '</span>' : '<span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-bold">Club Principal</span>') +
+                            '</div>' +
                             '<h3 class="text-base font-black text-white m-0">' + club.name + ' <span class="text-emerald-400 font-mono text-xs">(' + club.shortName + ' • ' + (club.pitchMode || '7v7') + ')</span></h3>' +
-                            '<div class="text-slate-400">Responsable: <strong class="text-slate-200">' + (club.coach || 'DT') + '</strong> • Correo de Acceso: <strong class="text-cyan-300 font-mono">' + (club.email || 'Asignado por Admin') + '</strong></div>' +
+                            '<div class="text-slate-400">Responsable: <strong class="text-slate-200">' + (activeRootClub.coach || 'DT') + '</strong> • Correo de Acceso: <strong class="text-cyan-300 font-mono">' + (activeRootClub.email || 'Asignado por Admin') + '</strong></div>' +
                         '</div>' +
                     '</div>' +
                     '<div class="flex flex-wrap gap-2">' +
-                        '<button onclick="openResetClubPasswordModal(\'' + club.id + '\')" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🔑 Cambiar Clave / Credenciales</button>' +
-                        '<button onclick="handleDeleteClub(\'' + club.id + '\')" class="px-3 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-bold cursor-pointer">🗑️ Eliminar Club</button>' +
+                        '<button onclick="openResetClubPasswordModal(\'' + activeRootClub.id + '\')" class="px-3 py-2 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-extrabold cursor-pointer">🔑 Clave de ' + activeRootClub.name + '</button>' +
+                        '<button onclick="handleDeleteClub(\'' + club.id + '\')" class="px-3 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-bold cursor-pointer">🗑️ Eliminar ' + (club.parentTeamId ? 'Sub-Equipo' : 'Club') + '</button>' +
                     '</div>' +
                 '</div>' +
                 '<div class="glass-panel p-5 border border-slate-800 space-y-3 overflow-x-auto">' +
@@ -4506,7 +5201,7 @@
                     '</table>' +
                 '</div>' +
                 '<div class="glass-panel p-5 border border-slate-800 space-y-3">' +
-                    '<h3 class="text-base font-black text-white m-0">👔 Cuerpo Técnico Acreditado — ' + club.name + '</h3>' +
+                    '<h3 class="text-base font-black text-white m-0">👔 Cuerpo Técnico Acreditado (Único de ' + activeRootClub.name + ')</h3>' +
                     '<div class="space-y-2">' + (staffRows || '<div class="text-xs text-slate-400">Sin cuerpo técnico registrado en este club.</div>') + '</div>' +
                 '</div>' +
             '</div>';
@@ -4976,6 +5671,13 @@
                     }
                 }
             }
+            if (db.payments) {
+                for (var pIdx = 0; pIdx < db.payments.length; pIdx++) {
+                    if (db.payments[pIdx].matchId === matchId && db.payments[pIdx].status === 'unpaid') {
+                        db.payments[pIdx].date = date;
+                    }
+                }
+            }
             closeGlobalModal();
             saveDB();
             renderViewport();
@@ -4996,39 +5698,43 @@
                 var club = findTeam(py.teamId);
                 var tr = findTournament(py.tournamentId);
                 var badge = py.status === 'approved'
-                    ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-black">✅ VERIFICADO</span>'
+                    ? '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-black">✅ PAGO VERIFICADO</span>'
                     : py.status === 'rejected'
-                        ? '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-black">❌ RECHAZADO</span>'
-                        : '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-black">⏳ PENDIENTE</span>';
+                        ? '<span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-black">❌ NO VERIFICADO (RECHAZADO)</span>'
+                        : py.status === 'pending'
+                            ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-black">⏳ NO VERIFICADO (CON CAPTURE)</span>'
+                            : '<span class="px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/40 text-[10px] font-black">⚠️ DEUDA POR PAGAR</span>';
 
-                rows += '<tr class="border-b border-slate-800/70">' +
+                rows += '<tr class="border-b border-slate-800/70 ' + (py.status === 'unpaid' ? 'bg-rose-500/5' : '') + '">' +
                     '<td class="py-3 pl-2 font-bold text-white">' + club.name + '</td>' +
-                    '<td class="py-3 text-xs text-slate-200">' + py.concept + '<div class="text-[10px] text-slate-400">' + (tr ? tr.name : '') + '</div></td>' +
+                    '<td class="py-3 text-xs text-slate-200">' + py.concept + '<div class="text-[10px] text-slate-400">' + (tr ? tr.name : '') + ' • ' + (py.date || '') + '</div></td>' +
                     '<td class="py-3 font-mono font-black text-emerald-400">' + py.amount + '</td>' +
-                    '<td class="py-3 text-xs text-slate-300">' + py.method + ' <span class="font-mono text-cyan-300">(' + py.reference + ')</span></td>' +
+                    '<td class="py-3 text-xs text-slate-300">' + (py.method || 'Por pagar') + (py.reference && py.reference !== 'Sin comprobante' ? ' <span class="font-mono text-cyan-300">(' + py.reference + ')</span>' : '') + '</td>' +
                     '<td class="py-3">' + badge + '</td>' +
                     '<td class="py-3 text-right pr-2 space-x-1">' +
-                        '<button onclick="openPaymentReceiptModal(\'' + py.id + '\')" class="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold cursor-pointer">🧾 Ver Capture</button>' +
-                        '<button onclick="setAdminPaymentStatus(\'' + py.id + '\', \'approved\')" class="px-2.5 py-1 rounded-lg bg-emerald-500 text-slate-950 text-[11px] font-black border-0 cursor-pointer">✓ Aprobar</button>' +
+                        (py.status !== 'unpaid'
+                            ? '<button onclick="openPaymentReceiptModal(\'' + py.id + '\')" class="px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold cursor-pointer">🧾 Ver Capture</button>'
+                            : '') +
+                        '<button onclick="setAdminPaymentStatus(\'' + py.id + '\', \'approved\')" class="px-2.5 py-1 rounded-lg bg-emerald-500 text-slate-950 text-[11px] font-black border-0 cursor-pointer">✓ Verificar Pago</button>' +
                         '<button onclick="setAdminPaymentStatus(\'' + py.id + '\', \'rejected\')" class="px-2.5 py-1 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[11px] font-bold cursor-pointer">✕</button>' +
                     '</td>' +
                 '</tr>';
             }
 
             if (!rows) {
-                rows = '<tr><td colspan="6" class="py-4 text-center text-xs text-slate-400">Aún no hay pagos reportados por los clubes.</td></tr>';
+                rows = '<tr><td colspan="6" class="py-4 text-center text-xs text-slate-400">Aún no hay deudas ni pagos registrados por los clubes.</td></tr>';
             }
 
             return '<div class="glass-panel p-5 border border-purple-500/30 space-y-4 overflow-x-auto">' +
                 '<div>' +
                     '<span class="text-[10px] font-mono uppercase text-purple-300 font-bold">Tesorería Oficial • Liga F7 Caracas</span>' +
-                    '<h2 class="text-lg font-black text-white m-0">💳 Control de Pagos y Solvencia de Clubes</h2>' +
-                    '<p class="text-xs text-slate-400 m-0">Revisa los comprobantes de inscripción y arbitraje subidos por los clubes y aprueba su solvencia.</p>' +
+                    '<h2 class="text-lg font-black text-white m-0">💳 Control de Deudas, Pagos y Solvencia de Clubes</h2>' +
+                    '<p class="text-xs text-slate-400 m-0">Visualiza automáticamente las deudas de inscripción y arbitraje por jornada, revisa los captures y marca cada pago como verificado.</p>' +
                 '</div>' +
                 '<table class="w-full text-left border-collapse text-xs sm:text-sm">' +
                     '<thead>' +
                         '<tr class="border-b border-slate-800 text-[11px] uppercase text-slate-400">' +
-                            '<th class="py-2 pl-2">Club</th><th class="py-2">Concepto</th><th class="py-2">Monto</th><th class="py-2">Método / Ref</th><th class="py-2">Estado</th><th class="py-2 text-right pr-2">Acciones</th>' +
+                            '<th class="py-2 pl-2">Club / Categoría</th><th class="py-2">Concepto / Fecha</th><th class="py-2">Monto</th><th class="py-2">Método / Ref</th><th class="py-2">Estado</th><th class="py-2 text-right pr-2">Acciones</th>' +
                         '</tr>' +
                     '</thead>' +
                     '<tbody>' + rows + '</tbody>' +
@@ -5384,9 +6090,11 @@
                     return;
                 }
                 t.teamIds.push(teamId);
-                notify('✅ ' + c.name + ' incluido en ' + t.name);
+                ensureLocalEnrollmentDebt(t, teamId);
+                notify('✅ ' + c.name + ' incluido en ' + t.name + ' (deuda de inscripción creada)');
             } else {
                 t.teamIds.splice(idx, 1);
+                removeLocalUnpaidEnrollmentDebt(t.id, teamId);
                 notify('➖ ' + c.name + ' retirado de ' + t.name);
             }
             saveDB();
@@ -5484,7 +6192,7 @@
                         var pitchNum = (slotIdx % 2) + 1;
                         slotIdx++;
                         roundPairings.push({ h: h, a: a, matchHour: matchHour, pitchNum: pitchNum });
-                        db.matches.push({
+                        var mIda = {
                             id: 'm-' + Date.now() + '-' + created,
                             tournamentId: t.id,
                             round: 'Jornada ' + (r + 1) + ' (Ida)',
@@ -5497,7 +6205,9 @@
                             minute: 0,
                             date: t.startDate + ' • ' + matchHour,
                             pitch: 'Cancha ' + pitchNum + ' (' + t.pitchSize + ')'
-                        });
+                        };
+                        db.matches.push(mIda);
+                        createLocalMatchRefereeDebts(t, mIda);
                     }
                 }
                 firstLegRounds.push(roundPairings);
@@ -5510,7 +6220,7 @@
                 for (var j = 0; j < pairings.length; j++) {
                     var pm = pairings[j];
                     created++;
-                    db.matches.push({
+                    var mVuelta = {
                         id: 'm-' + Date.now() + '-' + created,
                         tournamentId: t.id,
                         round: 'Jornada ' + (rounds + r2 + 1) + ' (Vuelta)',
@@ -5523,7 +6233,9 @@
                         minute: 0,
                         date: t.startDate + ' • ' + pm.matchHour,
                         pitch: 'Cancha ' + pm.pitchNum + ' (' + t.pitchSize + ')'
-                    });
+                    };
+                    db.matches.push(mVuelta);
+                    createLocalMatchRefereeDebts(t, mVuelta);
                 }
             }
 
@@ -5905,6 +6617,7 @@
         window.onload = function() {
             applyRouteFromBrowserUrl();
             triggerRouteLoader(getCurrentRoutePath());
+            ensureGlobalLiveClockTick();
             renderViewport();
             initRealtimeSync();
         };

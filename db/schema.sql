@@ -11,13 +11,15 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. Tabla de Equipos (Clubes)
+-- 2. Tabla de Equipos (Clubes y Sub-Equipos / Categorías)
 CREATE TABLE IF NOT EXISTS teams (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) UNIQUE NOT NULL,
     short_name VARCHAR(10) NOT NULL DEFAULT 'CLB',
     coach_name VARCHAR(120) NOT NULL,
-    owner_id INTEGER UNIQUE REFERENCES users(id) ON DELETE SET NULL,
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    parent_team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    category_label VARCHAR(50) DEFAULT 'Categoría Libre',
     primary_color VARCHAR(15) DEFAULT '#10b981',
     logo_url TEXT,
     pitch_mode VARCHAR(10) DEFAULT '5v5' CHECK (pitch_mode IN ('5v5', '7v7', '11v11')),
@@ -30,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tournaments (
     id SERIAL PRIMARY KEY,
     name VARCHAR(150) NOT NULL,
     format VARCHAR(50) NOT NULL DEFAULT 'Liga Regular',
+    category_label VARCHAR(50) DEFAULT 'Categoría Libre',
     pitch_size VARCHAR(10) NOT NULL DEFAULT '5v5' CHECK (pitch_size IN ('5v5', '7v7', '11v11')),
     max_teams INTEGER NOT NULL DEFAULT 8,
     start_date VARCHAR(40) NOT NULL,
@@ -114,6 +117,9 @@ CREATE TABLE IF NOT EXISTS matches (
     status VARCHAR(20) DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'live', 'finished', 'suspended')),
     period VARCHAR(10) DEFAULT '1T',
     current_minute INTEGER DEFAULT 0,
+    clock_running BOOLEAN DEFAULT FALSE,
+    clock_started_at BIGINT DEFAULT NULL,
+    clock_elapsed_sec INTEGER DEFAULT 0,
     mvp_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
     suspension_reason TEXT,
     forfeit_winner_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
@@ -141,13 +147,14 @@ CREATE TABLE IF NOT EXISTS club_payments (
     id SERIAL PRIMARY KEY,
     team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     tournament_id INTEGER REFERENCES tournaments(id) ON DELETE SET NULL,
-    concept VARCHAR(120) NOT NULL,
+    match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE,
+    concept VARCHAR(160) NOT NULL,
     amount VARCHAR(40) NOT NULL,
-    method VARCHAR(40) NOT NULL,
-    reference VARCHAR(60) NOT NULL,
-    payment_date VARCHAR(30) NOT NULL,
+    method VARCHAR(40) DEFAULT 'Por pagar',
+    reference VARCHAR(60) DEFAULT 'Sin comprobante',
+    payment_date VARCHAR(40) NOT NULL,
     receipt_doc TEXT,
-    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    status VARCHAR(20) DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'pending', 'approved', 'rejected')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
