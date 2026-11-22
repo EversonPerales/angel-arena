@@ -1442,6 +1442,11 @@ app.put('/api/matches/:matchId/schedule', authenticateToken, authorizeRoles('adm
   try {
     const matchId = parseId(req.params.matchId);
     const { round, date, pitch, reactivateIfSuspended } = req.body;
+    const current = await pool.query('SELECT status FROM matches WHERE id = $1', [matchId]);
+    if (current.rows.length === 0) return res.status(404).json({ error: 'Partido no encontrado.' });
+    if (current.rows[0].status === 'finished') {
+      return res.status(400).json({ error: 'No se puede editar un partido que ya fue finalizado por el árbitro.' });
+    }
     await pool.query(
       `UPDATE matches SET
         round_name = COALESCE($1, round_name),

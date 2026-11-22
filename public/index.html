@@ -584,7 +584,54 @@
             }, 3200);
         }
 
+        var pendingConfirmAction = null;
+
+        function confirmDangerousAction(title, message, confirmBtnText, onConfirm) {
+            pendingConfirmAction = onConfirm;
+            var modal = document.getElementById('global-modal');
+            var body = document.getElementById('global-modal-body');
+            if (!modal || !body) {
+                if (window.confirm(title + '\n\n' + message)) {
+                    if (typeof onConfirm === 'function') onConfirm();
+                }
+                return;
+            }
+            body.innerHTML = '' +
+                '<div class="space-y-4">' +
+                    '<div class="flex items-center justify-between border-b border-rose-500/30 pb-3">' +
+                        '<div class="flex items-center gap-2.5">' +
+                            '<div class="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-lg shrink-0">⚠️</div>' +
+                            '<div>' +
+                                '<span class="text-[10px] font-mono uppercase text-rose-400 font-bold">Confirmación de Seguridad</span>' +
+                                '<h3 class="text-base sm:text-lg font-black text-white m-0">' + title + '</h3>' +
+                            '</div>' +
+                        '</div>' +
+                        '<button onclick="cancelDangerousAction()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-white text-xs font-bold border-0 cursor-pointer">✕</button>' +
+                    '</div>' +
+                    '<p class="text-xs sm:text-sm text-slate-300 m-0 leading-relaxed">' + message + '</p>' +
+                    '<div class="flex flex-wrap justify-end gap-2 pt-2 border-t border-slate-800">' +
+                        '<button type="button" onclick="cancelDangerousAction()" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border-0 cursor-pointer">Cancelar</button>' +
+                        '<button type="button" onclick="executePendingDangerousAction()" class="px-5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 text-xs font-black border-0 cursor-pointer">🗑️ ' + (confirmBtnText || 'Sí, Eliminar') + '</button>' +
+                    '</div>' +
+                '</div>';
+            modal.style.display = 'flex';
+        }
+
+        function cancelDangerousAction() {
+            pendingConfirmAction = null;
+            closeGlobalModal();
+        }
+
+        function executePendingDangerousAction() {
+            var fn = pendingConfirmAction;
+            pendingConfirmAction = null;
+            var modal = document.getElementById('global-modal');
+            if (modal) modal.style.display = 'none';
+            if (typeof fn === 'function') fn();
+        }
+
         function closeGlobalModal() {
+            pendingConfirmAction = null;
             var m = document.getElementById('global-modal');
             if (m) m.style.display = 'none';
             if (db && db.currentUser) renderViewport();
@@ -799,13 +846,20 @@
         }
 
         function resetSystem() {
-            stopRefTimer();
-            authToken = null;
-            db = createInitialData();
-            saveDB();
-            renderViewport();
-            apiRequest('POST', '/api/system/reset');
-            notify('🔄 Datos restaurados al estado inicial');
+            confirmDangerousAction(
+                '¿Restaurar todo el sistema?',
+                '¿Estás seguro de que deseas restaurar el sistema a su estado inicial? Esta acción eliminará clubes, equipos, jugadores, partidos y torneos.',
+                'Sí, Restaurar Sistema',
+                function() {
+                    stopRefTimer();
+                    authToken = null;
+                    db = createInitialData();
+                    saveDB();
+                    renderViewport();
+                    apiRequest('POST', '/api/system/reset');
+                    notify('🔄 Datos restaurados al estado inicial');
+                }
+            );
         }
 
         function openRegisterClubModal() {
@@ -1561,13 +1615,21 @@
                 return;
             }
             var sub = findTeam(subTeamId);
-            db.teams = db.teams.filter(function(t) { return t.id !== subTeamId; });
-            db.players = db.players.filter(function(p) { return p.teamId !== subTeamId; });
-            activeClubTeamId = rootClub.id;
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/teams/subteams/' + subTeamId);
-            notify('🗑️ Sub-equipo "' + (sub ? sub.name : '') + '" eliminado');
+            var subName = sub ? sub.name : 'este equipo';
+            confirmDangerousAction(
+                '¿Eliminar equipo "' + subName + '"?',
+                'Esta acción eliminará el equipo <strong>' + subName + '</strong> y todos los jugadores inscritos en esta categoría. ¿Estás seguro de que deseas continuar?',
+                'Sí, Eliminar Equipo',
+                function() {
+                    db.teams = db.teams.filter(function(t) { return t.id !== subTeamId; });
+                    db.players = db.players.filter(function(p) { return p.teamId !== subTeamId; });
+                    activeClubTeamId = null;
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/teams/subteams/' + subTeamId);
+                    notify('🗑️ Equipo "' + subName + '" eliminado');
+                }
+            );
         }
 
         function renderClubDashboard() {
@@ -3821,16 +3883,28 @@
 
         function handleDeleteClubStaff(staffId) {
             if (!db.staff) return;
-            for (var i = 0; i < db.staff.length; i++) {
-                if (db.staff[i].id === staffId) {
-                    db.staff.splice(i, 1);
-                    break;
-                }
+            var target = null;
+            for (var k = 0; k < db.staff.length; k++) {
+                if (db.staff[k].id === staffId) target = db.staff[k];
             }
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/staff/' + staffId);
-            notify('🗑️ Integrante retirado del cuerpo técnico');
+            var sName = target ? (target.name || (target.firstName + ' ' + target.lastName)) : 'este integrante';
+            confirmDangerousAction(
+                '¿Retirar a ' + sName + '?',
+                'Se eliminará a <strong>' + sName + '</strong> del Cuerpo Técnico acreditado junto con su expediente. ¿Estás seguro?',
+                'Sí, Retirar del Cuerpo Técnico',
+                function() {
+                    for (var i = 0; i < db.staff.length; i++) {
+                        if (db.staff[i].id === staffId) {
+                            db.staff.splice(i, 1);
+                            break;
+                        }
+                    }
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/staff/' + staffId);
+                    notify('🗑️ Integrante retirado del cuerpo técnico');
+                }
+            );
         }
 
         function ensureLocalEnrollmentDebt(tourney, teamId) {
@@ -5220,18 +5294,24 @@
         function handleDeletePlayer(playerId) {
             var p = findPlayer(playerId);
             if (!p) return;
-            for (var i = 0; i < db.players.length; i++) {
-                if (db.players[i].id === playerId) {
-                    db.players.splice(i, 1);
-                    break;
+            confirmDangerousAction(
+                '¿Dar de baja a #' + p.number + ' ' + p.name + '?',
+                'El jugador <strong>#' + p.number + ' ' + p.name + '</strong> será eliminado permanentemente del plantel y su dorsal quedará libre. ¿Estás seguro?',
+                'Sí, Eliminar Jugador',
+                function() {
+                    for (var i = 0; i < db.players.length; i++) {
+                        if (db.players[i].id === playerId) {
+                            db.players.splice(i, 1);
+                            break;
+                        }
+                    }
+                    if (selectedPitchStarterId === playerId) selectedPitchStarterId = null;
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/players/' + playerId);
+                    notify('🗑️ Jugador #' + p.number + ' ' + p.name + ' dado de baja (Dorsal #' + p.number + ' liberado)');
                 }
-            }
-            if (selectedPitchStarterId === playerId) selectedPitchStarterId = null;
-            closeGlobalModal();
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/players/' + playerId);
-            notify('🗑️ Jugador #' + p.number + ' ' + p.name + ' dado de baja (Dorsal #' + p.number + ' liberado)');
+            );
         }
 
         function handleAdminClearSuspension(playerId) {
@@ -5347,32 +5427,67 @@
 
         function handleDeleteClub(teamId) {
             var club = findTeam(teamId);
-            db.teams = db.teams.filter(function(t) { return t.id !== teamId; });
-            db.players = db.players.filter(function(p) { return p.teamId !== teamId; });
-            if (db.staff) db.staff = db.staff.filter(function(s) { return s.teamId !== teamId; });
-            if (db.payments) db.payments = db.payments.filter(function(py) { return py.teamId !== teamId; });
-            db.accounts = db.accounts.filter(function(a) { return a.teamId !== teamId; });
-            db.matches = db.matches.filter(function(m) { return m.homeId !== teamId && m.awayId !== teamId; });
-            for (var i = 0; i < db.tournaments.length; i++) {
-                db.tournaments[i].teamIds = db.tournaments[i].teamIds.filter(function(id) { return id !== teamId; });
-            }
-            selectedAuditClubId = db.teams.length > 0 ? db.teams[0].id : '';
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/admin/clubs/' + teamId);
-            notify('🗑️ Club ' + club.name + ' eliminado del sistema');
+            var clubName = club ? club.name : 'este club';
+            confirmDangerousAction(
+                '¿Eliminar club "' + clubName + '"?',
+                '¿Estás seguro de que deseas eliminar el club <strong>' + clubName + '</strong>? Se borrarán también sus equipos, jugadores, cuerpo técnico, partidos, pagos y credenciales de acceso. Esta acción no se puede deshacer.',
+                'Sí, Eliminar Club',
+                function() {
+                    db.teams = db.teams.filter(function(t) { return t.id !== teamId && t.parentTeamId !== teamId; });
+                    db.players = db.players.filter(function(p) { return p.teamId !== teamId; });
+                    if (db.staff) db.staff = db.staff.filter(function(s) { return s.teamId !== teamId; });
+                    if (db.payments) db.payments = db.payments.filter(function(py) { return py.teamId !== teamId; });
+                    db.accounts = db.accounts.filter(function(a) { return a.teamId !== teamId; });
+                    db.matches = db.matches.filter(function(m) { return m.homeId !== teamId && m.awayId !== teamId; });
+                    for (var i = 0; i < db.tournaments.length; i++) {
+                        db.tournaments[i].teamIds = db.tournaments[i].teamIds.filter(function(id) { return id !== teamId; });
+                    }
+                    selectedAuditClubId = db.teams.length > 0 ? db.teams[0].id : '';
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/admin/clubs/' + teamId);
+                    notify('🗑️ Club ' + clubName + ' eliminado del sistema');
+                }
+            );
         }
 
         function handleAdminDeleteTourney(tourneyId) {
             var t = findTournament(tourneyId);
             var tName = t ? t.name : 'Torneo';
-            db.tournaments = db.tournaments.filter(function(item) { return item.id !== tourneyId; });
-            db.matches = db.matches.filter(function(m) { return m.tournamentId !== tourneyId; });
-            activeTourneyId = db.tournaments.length > 0 ? db.tournaments[0].id : '';
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/tournaments/' + tourneyId);
-            notify('🗑️ Torneo "' + tName + '" eliminado oficialmente');
+            confirmDangerousAction(
+                '¿Eliminar torneo "' + tName + '"?',
+                '¿Estás seguro de que deseas eliminar el torneo <strong>' + tName + '</strong>? También se eliminarán todos los partidos y el calendario asociado a este torneo. Esta acción no se puede deshacer.',
+                'Sí, Eliminar Torneo',
+                function() {
+                    db.tournaments = db.tournaments.filter(function(item) { return item.id !== tourneyId; });
+                    db.matches = db.matches.filter(function(m) { return m.tournamentId !== tourneyId; });
+                    activeTourneyId = db.tournaments.length > 0 ? db.tournaments[0].id : '';
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/tournaments/' + tourneyId);
+                    notify('🗑️ Torneo "' + tName + '" eliminado oficialmente');
+                }
+            );
+        }
+
+        function parseMatchDateTimeParts(dateStr) {
+            var str = String(dateStr || '');
+            var dateMatch = str.match(/(\d{4}-\d{2}-\d{2})/);
+            var timeMatch = str.match(/(\d{1,2}):(\d{2})/);
+            var datePart = dateMatch ? dateMatch[1] : '';
+            var timePart = '16:00';
+            if (timeMatch) {
+                var hh = timeMatch[1].length === 1 ? ('0' + timeMatch[1]) : timeMatch[1];
+                timePart = hh + ':' + timeMatch[2];
+            }
+            return { datePart: datePart, timePart: timePart };
+        }
+
+        function formatMatchDateTimeValue(dateVal, timeVal) {
+            var d = String(dateVal || '').trim();
+            var t = String(timeVal || '').trim();
+            if (d && t) return d + ' • ' + t;
+            return d || t || '';
         }
 
         function openEditMatchScheduleModal(matchId) {
@@ -5381,8 +5496,13 @@
                 if (db.matches[i].id === matchId) m = db.matches[i];
             }
             if (!m) return;
+            if (m.status === 'finished') {
+                notify('🔒 Este partido ya fue finalizado por el árbitro y no puede ser editado.');
+                return;
+            }
             var h = findTeam(m.homeId);
             var a = findTeam(m.awayId);
+            var dtParts = parseMatchDateTimeParts(m.date);
 
             var modal = document.getElementById('global-modal');
             var body = document.getElementById('global-modal-body');
@@ -5400,9 +5520,15 @@
                             '<label class="block font-bold text-slate-300 mb-1">Jornada / Fase</label>' +
                             '<input type="text" id="edt-m-round" required value="' + (m.round || 'Jornada 1') + '" class="fallback-input">' +
                         '</div>' +
-                        '<div>' +
-                            '<label class="block font-bold text-slate-300 mb-1">Fecha y Hora del Partido</label>' +
-                            '<input type="text" id="edt-m-date" required value="' + (m.date || '') + '" placeholder="Ej: Sábado 24 Nov • 16:00" class="fallback-input">' +
+                        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">📅 Fecha del Partido</label>' +
+                                '<input type="date" id="edt-m-date" required value="' + dtParts.datePart + '" class="fallback-input">' +
+                            '</div>' +
+                            '<div>' +
+                                '<label class="block font-bold text-slate-300 mb-1">🕒 Hora del Partido</label>' +
+                                '<input type="time" id="edt-m-time" required value="' + dtParts.timePart + '" class="fallback-input">' +
+                            '</div>' +
                         '</div>' +
                         '<div>' +
                             '<label class="block font-bold text-slate-300 mb-1">Cancha / Sede Asignada</label>' +
@@ -5418,12 +5544,28 @@
         }
 
         function handleAdminDeleteMatch(matchId) {
-            db.matches = db.matches.filter(function(m) { return m.id !== matchId; });
-            closeGlobalModal();
-            saveDB();
-            renderViewport();
-            apiRequest('DELETE', '/api/matches/' + matchId);
-            notify('🗑️ Partido eliminado del calendario');
+            var matchObj = null;
+            for (var i = 0; i < db.matches.length; i++) {
+                if (db.matches[i].id === matchId) { matchObj = db.matches[i]; break; }
+            }
+            var label = 'este partido';
+            if (matchObj) {
+                var h = findTeam(matchObj.homeId);
+                var a = findTeam(matchObj.awayId);
+                label = (h ? h.name : 'Local') + ' vs ' + (a ? a.name : 'Visitante');
+            }
+            confirmDangerousAction(
+                '¿Eliminar partido?',
+                '¿Estás seguro de que deseas eliminar del calendario el partido <strong>' + label + '</strong>? Esta acción no se puede deshacer.',
+                'Sí, Eliminar Partido',
+                function() {
+                    db.matches = db.matches.filter(function(m) { return m.id !== matchId; });
+                    saveDB();
+                    renderViewport();
+                    apiRequest('DELETE', '/api/matches/' + matchId);
+                    notify('🗑️ Partido eliminado del calendario');
+                }
+            );
         }
 
         function openCreateManualMatchModal(tourneyId) {
@@ -5466,13 +5608,17 @@
                         '</div>' +
                         '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">' +
                             '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">Fecha y Hora</label>' +
-                                '<input type="text" id="man-m-date" required placeholder="Ej: Sábado • 18:00" class="fallback-input">' +
+                                '<label class="block font-bold text-slate-300 mb-1">📅 Fecha del Partido</label>' +
+                                '<input type="date" id="man-m-date" required class="fallback-input">' +
                             '</div>' +
                             '<div>' +
-                                '<label class="block font-bold text-slate-300 mb-1">Cancha / Sede</label>' +
-                                '<input type="text" id="man-m-pitch" required value="Cancha Principal (' + t.pitchSize + ')" class="fallback-input">' +
+                                '<label class="block font-bold text-slate-300 mb-1">🕒 Hora del Partido</label>' +
+                                '<input type="time" id="man-m-time" required value="18:00" class="fallback-input">' +
                             '</div>' +
+                        '</div>' +
+                        '<div>' +
+                            '<label class="block font-bold text-slate-300 mb-1">Cancha / Sede</label>' +
+                            '<input type="text" id="man-m-pitch" required value="Cancha Principal (' + t.pitchSize + ')" class="fallback-input">' +
                         '</div>' +
                         '<button type="submit" class="btn-primary-gradient w-full py-3 text-xs sm:text-sm font-black">✅ Crear y Publicar Partido</button>' +
                     '</form>' +
@@ -5487,7 +5633,9 @@
             var homeId = document.getElementById('man-m-home').value;
             var awayId = document.getElementById('man-m-away').value;
             var round = document.getElementById('man-m-round').value.trim();
-            var date = document.getElementById('man-m-date').value.trim();
+            var dateVal = document.getElementById('man-m-date').value.trim();
+            var timeVal = document.getElementById('man-m-time') ? document.getElementById('man-m-time').value.trim() : '';
+            var date = formatMatchDateTimeValue(dateVal, timeVal);
             var pitch = document.getElementById('man-m-pitch').value.trim();
 
             if (homeId === awayId) {
@@ -5593,21 +5741,27 @@
         }
 
         function handleAdminWipeAllTestData() {
-            stopRefTimer();
-            var currentAdmin = db.currentUser;
-            var currentRefs = db.referees;
-            var currentAdminPass = db.adminPass;
-            db = createInitialData();
-            db.currentUser = currentAdmin;
-            if (currentRefs) db.referees = currentRefs;
-            if (currentAdminPass) db.adminPass = currentAdminPass;
-            selectedAuditClubId = '';
-            activeTourneyId = '';
-            closeGlobalModal();
-            saveDB();
-            renderViewport();
-            apiRequest('POST', '/api/system/reset');
-            notify('🧹 Todos los clubes, jugadores y torneos de prueba fueron eliminados (Sistema en 0)');
+            confirmDangerousAction(
+                '¿Borrar TODOS los datos del sistema?',
+                '¿Estás completamente seguro de que deseas eliminar <strong>todos los clubes, equipos, jugadores, partidos, pagos y torneos</strong> dejando el sistema en 0? Solo se conservará tu cuenta de Administrador y los Árbitros. Esta acción es irreversible.',
+                'Sí, Borrar Todo',
+                function() {
+                    stopRefTimer();
+                    var currentAdmin = db.currentUser;
+                    var currentRefs = db.referees;
+                    var currentAdminPass = db.adminPass;
+                    db = createInitialData();
+                    db.currentUser = currentAdmin;
+                    if (currentRefs) db.referees = currentRefs;
+                    if (currentAdminPass) db.adminPass = currentAdminPass;
+                    selectedAuditClubId = '';
+                    activeTourneyId = '';
+                    saveDB();
+                    renderViewport();
+                    apiRequest('POST', '/api/system/reset');
+                    notify('🧹 Todos los clubes, jugadores y torneos de prueba fueron eliminados (Sistema en 0)');
+                }
+            );
         }
 
         function handleCreateReferee(e) {
@@ -5631,11 +5785,23 @@
 
         function handleDeleteReferee(refId) {
             if (!db.referees) return;
-            db.referees = db.referees.filter(function(r) { return r.id !== refId; });
-            saveDB();
-            apiRequest('DELETE', '/api/admin/referees/' + refId);
-            openAdminSecurityModal();
-            notify('🗑️ Árbitro retirado del sistema');
+            var refObj = null;
+            for (var i = 0; i < db.referees.length; i++) {
+                if (db.referees[i].id === refId) { refObj = db.referees[i]; break; }
+            }
+            var refName = refObj ? refObj.name : 'este árbitro';
+            confirmDangerousAction(
+                '¿Eliminar árbitro "' + refName + '"?',
+                '¿Estás seguro de que deseas retirar del sistema al árbitro <strong>' + refName + '</strong>? Perderá inmediatamente su acceso al Panel Arbitral.',
+                'Sí, Eliminar Árbitro',
+                function() {
+                    db.referees = db.referees.filter(function(r) { return r.id !== refId; });
+                    saveDB();
+                    apiRequest('DELETE', '/api/admin/referees/' + refId);
+                    openAdminSecurityModal();
+                    notify('🗑️ Árbitro retirado del sistema');
+                }
+            );
         }
 
         function handleChangeAdminOwnPassword(e) {
@@ -5654,8 +5820,20 @@
 
         function handleSaveMatchSchedule(e, matchId) {
             e.preventDefault();
+            var targetMatch = null;
+            for (var k = 0; k < db.matches.length; k++) {
+                if (db.matches[k].id === matchId) { targetMatch = db.matches[k]; break; }
+            }
+            if (!targetMatch) return;
+            if (targetMatch.status === 'finished') {
+                notify('🔒 Este partido ya fue finalizado por el árbitro y no puede ser editado.');
+                closeGlobalModal();
+                return;
+            }
             var round = document.getElementById('edt-m-round').value.trim();
-            var date = document.getElementById('edt-m-date').value.trim();
+            var dateVal = document.getElementById('edt-m-date').value.trim();
+            var timeVal = document.getElementById('edt-m-time') ? document.getElementById('edt-m-time').value.trim() : '';
+            var date = formatMatchDateTimeValue(dateVal, timeVal);
             var pitch = document.getElementById('edt-m-pitch').value.trim();
             var wasSuspended = false;
 
@@ -6315,7 +6493,9 @@
                             : '') +
                         '<div class="flex items-center justify-between pt-1">' +
                             (db.currentUser && db.currentUser.role === 'admin'
-                                ? '<button onclick="event.stopPropagation(); openEditMatchScheduleModal(\'' + item.id + '\')" class="px-2.5 py-1 rounded-lg ' + (item.status === 'suspended' ? 'bg-amber-500 text-slate-950 font-black' : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 font-bold') + ' text-[11px] cursor-pointer">' + (item.status === 'suspended' ? '📅 Reprogramar Fecha / Hora' : '✏️ Editar Fecha / Cancha') + '</button>'
+                                ? (item.status === 'finished'
+                                    ? '<span class="px-2.5 py-1 rounded-lg bg-slate-900/80 text-slate-400 border border-slate-700/60 text-[11px] font-bold">🔒 Finalizado</span>'
+                                    : '<button onclick="event.stopPropagation(); openEditMatchScheduleModal(\'' + item.id + '\')" class="px-2.5 py-1 rounded-lg ' + (item.status === 'suspended' ? 'bg-amber-500 text-slate-950 font-black' : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 font-bold') + ' text-[11px] cursor-pointer">' + (item.status === 'suspended' ? '📅 Reprogramar Fecha / Hora' : '✏️ Editar Fecha / Cancha') + '</button>')
                                 : '<span></span>') +
                             '<div class="text-[11px] text-emerald-400 font-bold text-right">📄 Ver Acta / Eventos →</div>' +
                         '</div>' +
