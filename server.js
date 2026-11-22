@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const zlib = require('zlib');
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -9,6 +10,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { Server } = require('socket.io');
+
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Promesa rechazada no controlada:', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Excepción no controlada:', err && err.message ? err.message : err);
+});
 
 const app = express();
 // Necesario detrás de Cloudflare y el proxy inverso (Traefik/Caddy) de Coolify o Dokploy
@@ -33,10 +41,17 @@ function createDbPool(forceSsl) {
         url.includes('sslmode=require') ||
         Boolean(process.env.RAILWAY_ENVIRONMENT);
 
-  return new Pool({
+  const newPool = new Pool({
     connectionString: url,
-    ssl: useSsl ? { rejectUnauthorized: false } : false
+    ssl: useSsl ? { rejectUnauthorized: false } : false,
+    max: parseInt(process.env.DB_POOL_MAX || '20', 10),
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000
   });
+  newPool.on('error', (err) => {
+    console.error('⚠️ Error inesperado en conexión inactiva de PostgreSQL:', err.message);
+  });
+  return newPool;
 }
 
 let pool = createDbPool();
@@ -377,11 +392,67 @@ async function getFullState(clientOrPool = pool) {
   };
 }
 
+// Caché en RAM pre-serializada y pre-comprimida (Gzip) para soportar alta concurrencia sin saturar PostgreSQL
+let stateCache = null;
+let stateBuildPromise = null;
+let stateVersionCounter = 1;
+
+function buildStateCacheEntry(fullState) {
+  const publicState = sanitizeStateForVisitor(fullState, null);
+  const fullJson = JSON.stringify(fullState);
+  const publicJson = JSON.stringify(publicState);
+  const fullGzip = zlib.gzipSync(fullJson);
+  const publicGzip = zlib.gzipSync(publicJson);
+  stateVersionCounter += 1;
+  const entry = {
+    version: stateVersionCounter,
+    fullState,
+    publicState,
+    fullJson,
+    publicJson,
+    fullGzip,
+    publicGzip,
+    fullEtag: `"f-${stateVersionCounter}"`,
+    publicEtag: `"p-${stateVersionCounter}"`
+  };
+  stateCache = entry;
+  return entry;
+}
+
+async function getCachedState(forceRefresh = false) {
+  if (!forceRefresh && stateCache) return stateCache;
+  if (!forceRefresh && stateBuildPromise) return stateBuildPromise;
+  const promise = getFullState()
+    .then((fullState) => buildStateCacheEntry(fullState))
+    .finally(() => {
+      if (stateBuildPromise === promise) stateBuildPromise = null;
+    });
+  stateBuildPromise = promise;
+  return promise;
+}
+
+function sendCachedStateResponse(req, res, entry, isAuth) {
+  const etag = isAuth ? entry.fullEtag : entry.publicEtag;
+  res.setHeader('ETag', etag);
+  res.setHeader('Vary', 'Accept-Encoding, Authorization');
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  if (acceptEncoding.includes('gzip')) {
+    res.setHeader('Content-Encoding', 'gzip');
+    return res.send(isAuth ? entry.fullGzip : entry.publicGzip);
+  }
+  return res.send(isAuth ? entry.fullJson : entry.publicJson);
+}
+
 async function broadcastState() {
   if (!dbReady) return null;
-  const state = await getFullState();
-  io.emit('state_sync', state);
-  return state;
+  const entry = await getCachedState(true);
+  io.to('room:auth').emit('state_sync', entry.fullState);
+  io.to('room:public').emit('state_sync', entry.publicState);
+  return entry.fullState;
 }
 
 // ==========================================
@@ -468,6 +539,12 @@ function checkLoginRateLimit(ip) {
 function recordLoginFailure(ip) {
   const now = Date.now();
   const windowMs = 15 * 60 * 1000;
+  if (loginAttemptStore.size > 5000) {
+    for (const [key, val] of loginAttemptStore.entries()) {
+      if (now - val.firstAt > windowMs) loginAttemptStore.delete(key);
+    }
+    if (loginAttemptStore.size > 5000) loginAttemptStore.clear();
+  }
   const entry = loginAttemptStore.get(ip);
   if (!entry || now - entry.firstAt > windowMs) {
     loginAttemptStore.set(ip, { count: 1, firstAt: now });
@@ -548,8 +625,9 @@ app.get('/api/state', async (req, res) => {
   if (!dbReady) return res.status(503).json({ error: 'Base de datos no disponible' });
   try {
     const user = getOptionalUserFromReq(req);
-    const state = await getFullState();
-    res.json(sanitizeStateForVisitor(state, user));
+    const isAuth = Boolean(user && (user.role === 'admin' || user.role === 'referee' || user.role === 'club'));
+    const entry = await getCachedState(false);
+    return sendCachedStateResponse(req, res, entry, isAuth);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1908,8 +1986,32 @@ app.post('/api/matches/:matchId/events', authenticateToken, authorizeRoles('refe
   }
 });
 
-// WebSockets para sincronizar el cronómetro en vivo
+// WebSockets con salas separadas (autenticados vs público) y sincronización de cronómetro en vivo
+function assignSocketRoom(socket, rawToken) {
+  let isAuth = false;
+  if (rawToken) {
+    try {
+      const decoded = jwt.verify(String(rawToken), JWT_SECRET);
+      if (decoded && (decoded.role === 'admin' || decoded.role === 'referee' || decoded.role === 'club')) {
+        isAuth = true;
+      }
+    } catch (e) {
+      isAuth = false;
+    }
+  }
+  socket.leave('room:auth');
+  socket.leave('room:public');
+  socket.join(isAuth ? 'room:auth' : 'room:public');
+}
+
 io.on('connection', (socket) => {
+  const initialToken = socket.handshake && socket.handshake.auth ? socket.handshake.auth.token : '';
+  assignSocketRoom(socket, initialToken);
+
+  socket.on('auth_sync', (payload) => {
+    assignSocketRoom(socket, payload && payload.token ? payload.token : '');
+  });
+
   socket.on('referee_clock_tick', (data) => {
     socket.broadcast.emit('live_clock_sync', data);
   });
