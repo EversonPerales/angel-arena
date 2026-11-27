@@ -1294,23 +1294,36 @@ app.put('/api/admin/clubs/:teamId/password', authenticateToken, authorizeRoles('
 
 app.delete('/api/admin/clubs/:teamId', authenticateToken, authorizeRoles('admin'), async (req, res) => {
   const client = await pool.connect();
+  let wasSubTeam = false;
   try {
     const teamId = parseId(req.params.teamId);
+    if (!teamId) return res.status(400).json({ error: 'ID de club/equipo inválido.' });
     await client.query('BEGIN');
-    const tmRes = await client.query('SELECT owner_id FROM teams WHERE id = $1', [teamId]);
-    const ownerId = tmRes.rows[0]?.owner_id;
+    const tmRes = await client.query('SELECT owner_id, parent_team_id FROM teams WHERE id = $1', [teamId]);
+    if (tmRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Club o equipo no encontrado.' });
+    }
+    const ownerId = tmRes.rows[0].owner_id;
+    wasSubTeam = Boolean(tmRes.rows[0].parent_team_id);
     await client.query('DELETE FROM teams WHERE id = $1', [teamId]);
-    if (ownerId) {
+    // Solo eliminar la cuenta de acceso del usuario si se eliminó el Club Principal (no un sub-equipo)
+    if (ownerId && !wasSubTeam) {
       await client.query("DELETE FROM users WHERE id = $1 AND role = 'club'", [ownerId]);
     }
     await client.query('COMMIT');
-    const state = await broadcastState();
-    res.json({ message: 'Club eliminado del sistema.', state });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    return res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+
+  try {
+    const state = await broadcastState();
+    return res.json({ message: wasSubTeam ? 'Sub-equipo eliminado del sistema.' : 'Club eliminado del sistema.', state });
+  } catch (err) {
+    return res.json({ message: wasSubTeam ? 'Sub-equipo eliminado del sistema.' : 'Club eliminado del sistema.' });
   }
 });
 
@@ -1490,11 +1503,15 @@ app.post('/api/staff', authenticateToken, authorizeRoles('club'), async (req, re
   }
 });
 
-app.delete('/api/staff/:staffId', authenticateToken, authorizeRoles('club'), async (req, res) => {
+app.delete('/api/staff/:staffId', authenticateToken, authorizeRoles('club', 'admin'), async (req, res) => {
   try {
-    const teamId = parseId(req.user.teamId);
     const staffId = parseId(req.params.staffId);
-    await pool.query('DELETE FROM club_staff WHERE id = $1 AND team_id = $2', [staffId, teamId]);
+    if (req.user.role === 'admin') {
+      await pool.query('DELETE FROM club_staff WHERE id = $1', [staffId]);
+    } else {
+      const teamId = parseId(req.user.teamId);
+      await pool.query('DELETE FROM club_staff WHERE id = $1 AND team_id = $2', [staffId, teamId]);
+    }
     const state = await broadcastState();
     res.json({ message: 'Integrante del cuerpo técnico eliminado.', state });
   } catch (err) {
@@ -1551,13 +1568,30 @@ app.post('/api/tournaments', authenticateToken, authorizeRoles('admin'), async (
 });
 
 app.delete('/api/tournaments/:tournamentId', authenticateToken, authorizeRoles('admin'), async (req, res) => {
+  const client = await pool.connect();
   try {
     const tournamentId = parseId(req.params.tournamentId);
-    await pool.query('DELETE FROM tournaments WHERE id = $1', [tournamentId]);
-    const state = await broadcastState();
-    res.json({ message: 'Torneo eliminado oficialmente.', state });
+    if (!tournamentId) return res.status(400).json({ error: 'ID de torneo inválido.' });
+    await client.query('BEGIN');
+    // Eliminar también todos los pagos y deudas pendientes asociados al torneo y a sus partidos
+    await client.query(
+      'DELETE FROM club_payments WHERE tournament_id = $1 OR match_id IN (SELECT id FROM matches WHERE tournament_id = $1)',
+      [tournamentId]
+    );
+    await client.query('DELETE FROM tournaments WHERE id = $1', [tournamentId]);
+    await client.query('COMMIT');
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+
+  try {
+    const state = await broadcastState();
+    return res.json({ message: 'Torneo y sus pagos/deudas eliminados oficialmente.', state });
+  } catch (err) {
+    return res.json({ message: 'Torneo y sus pagos/deudas eliminados oficialmente.' });
   }
 });
 

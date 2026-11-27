@@ -397,9 +397,15 @@
         }
 
         var db = loadDB();
-        if (!db.staff) db.staff = createInitialData().staff;
-        if (!db.payments) db.payments = createInitialData().payments;
-        if (!db.referees) db.referees = [{ id: 'ref-1', name: 'Árbitro Oficial — Liga F7 Caracas', email: 'arbitro@ligaf7caracas.com', pass: 'ref123' }];
+        if (!Array.isArray(db.accounts)) db.accounts = [];
+        if (!Array.isArray(db.tournaments)) db.tournaments = [];
+        if (!Array.isArray(db.teams)) db.teams = [];
+        if (!Array.isArray(db.players)) db.players = [];
+        if (!Array.isArray(db.matches)) db.matches = [];
+        if (!Array.isArray(db.events)) db.events = [];
+        if (!Array.isArray(db.staff)) db.staff = createInitialData().staff;
+        if (!Array.isArray(db.payments)) db.payments = createInitialData().payments;
+        if (!Array.isArray(db.referees)) db.referees = [{ id: 'ref-1', name: 'Árbitro Oficial — Liga F7 Caracas', email: 'arbitro@ligaf7caracas.com', pass: 'ref123' }];
 
         var lastStateDigest = '';
         var lastStateEtag = '';
@@ -5408,10 +5414,13 @@
 
         function openResetClubPasswordModal(teamId) {
             var club = findTeam(teamId);
+            if (!club) return;
             var currentEmail = club.email || '';
-            for (var i = 0; i < db.accounts.length; i++) {
-                if (db.accounts[i].teamId === teamId) {
-                    currentEmail = db.accounts[i].email;
+            if (Array.isArray(db.accounts)) {
+                for (var i = 0; i < db.accounts.length; i++) {
+                    if (db.accounts[i].teamId === teamId) {
+                        currentEmail = db.accounts[i].email;
+                    }
                 }
             }
 
@@ -5444,10 +5453,12 @@
         function handleSaveNewClubPassword(e, teamId) {
             e.preventDefault();
             var club = findTeam(teamId);
+            if (!club) return;
             var email = document.getElementById('rst-club-email').value.trim().toLowerCase();
             var pass = document.getElementById('rst-club-pass').value.trim();
 
             club.email = email;
+            if (!Array.isArray(db.accounts)) db.accounts = [];
             var foundAcc = false;
             for (var i = 0; i < db.accounts.length; i++) {
                 if (db.accounts[i].teamId === teamId) {
@@ -5501,29 +5512,39 @@
         function handleDeleteClub(teamId) {
             var club = findTeam(teamId);
             var clubName = club ? club.name : 'este club';
+            var isSubTeam = Boolean(club && club.parentTeamId);
+            var parentId = isSubTeam ? club.parentTeamId : null;
             confirmDangerousAction(
-                '¿Eliminar club "' + clubName + '"?',
-                '¿Estás seguro de que deseas eliminar el club <strong>' + clubName + '</strong>? Se borrarán también sus equipos, jugadores, cuerpo técnico, partidos, pagos y credenciales de acceso. Esta acción no se puede deshacer.',
-                'Sí, Eliminar Club',
+                isSubTeam ? ('¿Eliminar equipo "' + clubName + '"?') : ('¿Eliminar club "' + clubName + '"?'),
+                isSubTeam
+                    ? ('¿Estás seguro de que deseas eliminar el equipo <strong>' + clubName + '</strong>? Se borrarán sus jugadores, partidos y pagos asociados. El club principal y sus demás categorías permanecerán intactos.')
+                    : ('¿Estás seguro de que deseas eliminar el club <strong>' + clubName + '</strong>? Se borrarán también sus equipos, jugadores, cuerpo técnico, partidos, pagos y credenciales de acceso. Esta acción no se puede deshacer.'),
+                isSubTeam ? 'Sí, Eliminar Equipo' : 'Sí, Eliminar Club',
                 function() {
                     var removedIds = [teamId];
                     for (var r = 0; r < db.teams.length; r++) {
                         if (db.teams[r].parentTeamId === teamId) removedIds.push(db.teams[r].id);
                     }
-                    db.teams = db.teams.filter(function(t) { return removedIds.indexOf(t.id) === -1; });
-                    db.players = db.players.filter(function(p) { return removedIds.indexOf(p.teamId) === -1; });
-                    if (db.staff) db.staff = db.staff.filter(function(s) { return removedIds.indexOf(s.teamId) === -1; });
-                    if (db.payments) db.payments = db.payments.filter(function(py) { return removedIds.indexOf(py.teamId) === -1; });
-                    db.accounts = db.accounts.filter(function(a) { return removedIds.indexOf(a.teamId) === -1; });
-                    db.matches = db.matches.filter(function(m) { return removedIds.indexOf(m.homeId) === -1 && removedIds.indexOf(m.awayId) === -1; });
-                    for (var i = 0; i < db.tournaments.length; i++) {
-                        db.tournaments[i].teamIds = db.tournaments[i].teamIds.filter(function(id) { return removedIds.indexOf(id) === -1; });
+                    db.teams = (db.teams || []).filter(function(t) { return removedIds.indexOf(t.id) === -1; });
+                    db.players = (db.players || []).filter(function(p) { return removedIds.indexOf(p.teamId) === -1; });
+                    if (Array.isArray(db.staff)) db.staff = db.staff.filter(function(s) { return removedIds.indexOf(s.teamId) === -1; });
+                    if (Array.isArray(db.payments)) db.payments = db.payments.filter(function(py) { return removedIds.indexOf(py.teamId) === -1; });
+                    if (Array.isArray(db.accounts)) db.accounts = db.accounts.filter(function(a) { return removedIds.indexOf(a.teamId) === -1; });
+                    db.matches = (db.matches || []).filter(function(m) { return removedIds.indexOf(m.homeId) === -1 && removedIds.indexOf(m.awayId) === -1; });
+                    for (var i = 0; i < (db.tournaments || []).length; i++) {
+                        db.tournaments[i].teamIds = (db.tournaments[i].teamIds || []).filter(function(id) { return removedIds.indexOf(id) === -1; });
                     }
-                    selectedAuditClubId = db.teams.length > 0 ? db.teams[0].id : '';
+                    if (parentId && findTeam(parentId)) {
+                        selectedAuditClubId = parentId;
+                    } else {
+                        var remainingRoot = db.teams.find ? db.teams.find(function(t) { return !t.parentTeamId; }) : (db.teams[0] || null);
+                        selectedAuditClubId = remainingRoot ? remainingRoot.id : (db.teams.length > 0 ? db.teams[0].id : '');
+                    }
                     saveDB();
                     renderViewport();
-                    apiRequest('DELETE', '/api/admin/clubs/' + teamId);
-                    notify('🗑️ Club ' + clubName + ' eliminado del sistema');
+                    apiRequest('DELETE', '/api/admin/clubs/' + teamId, null, function() {
+                        notify('🗑️ ' + (isSubTeam ? 'Equipo ' : 'Club ') + clubName + ' eliminado del sistema');
+                    });
                 }
             );
         }
@@ -5533,16 +5554,26 @@
             var tName = t ? t.name : 'Torneo';
             confirmDangerousAction(
                 '¿Eliminar torneo "' + tName + '"?',
-                '¿Estás seguro de que deseas eliminar el torneo <strong>' + tName + '</strong>? También se eliminarán todos los partidos y el calendario asociado a este torneo. Esta acción no se puede deshacer.',
+                '¿Estás seguro de que deseas eliminar el torneo <strong>' + tName + '</strong>? También se eliminarán todos los partidos, el calendario y todos los <strong>pagos y deudas pendientes</strong> asociados a este torneo. Esta acción no se puede deshacer.',
                 'Sí, Eliminar Torneo',
                 function() {
-                    db.tournaments = db.tournaments.filter(function(item) { return item.id !== tourneyId; });
-                    db.matches = db.matches.filter(function(m) { return m.tournamentId !== tourneyId; });
+                    var removedMatchIds = [];
+                    for (var mIdx = 0; mIdx < (db.matches || []).length; mIdx++) {
+                        if (db.matches[mIdx].tournamentId === tourneyId) removedMatchIds.push(db.matches[mIdx].id);
+                    }
+                    db.tournaments = (db.tournaments || []).filter(function(item) { return item.id !== tourneyId; });
+                    db.matches = (db.matches || []).filter(function(m) { return m.tournamentId !== tourneyId; });
+                    if (Array.isArray(db.payments)) {
+                        db.payments = db.payments.filter(function(py) {
+                            return py.tournamentId !== tourneyId && removedMatchIds.indexOf(py.matchId) === -1;
+                        });
+                    }
                     activeTourneyId = db.tournaments.length > 0 ? db.tournaments[0].id : '';
                     saveDB();
                     renderViewport();
-                    apiRequest('DELETE', '/api/tournaments/' + tourneyId);
-                    notify('🗑️ Torneo "' + tName + '" eliminado oficialmente');
+                    apiRequest('DELETE', '/api/tournaments/' + tourneyId, null, function() {
+                        notify('🗑️ Torneo "' + tName + '" y sus pagos/deudas eliminados oficialmente');
+                    });
                 }
             );
         }
@@ -5876,7 +5907,9 @@
             if (!db.referees) db.referees = [];
             db.referees.push({ id: 'ref-' + Date.now(), name: name, email: email, pass: pass });
             saveDB();
-            apiRequest('POST', '/api/admin/referees', { name: name, email: email, password: pass });
+            apiRequest('POST', '/api/admin/referees', { name: name, email: email, password: pass }, function() {
+                openAdminSecurityModal();
+            });
 
             var msg = '⚖️ *CREDENCIALES DE ARBITRAJE — LIGA F7 CARACAS*\n• *Árbitro:* ' + name + '\n• *Correo:* ' + email + '\n• *Contraseña:* ' + pass;
             if (navigator.clipboard && navigator.clipboard.writeText) {
